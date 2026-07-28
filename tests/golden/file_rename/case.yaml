@@ -1,0 +1,39 @@
+# 黄金用例：文件批量重命名 CLI（cli）
+# 用于验证命令行工具的生成，重点测子命令结构与 --help
+
+name: file_rename
+description: 文件批量重命名命令行工具（验证 cli 类型约束）
+requirement: "写一个命令行工具，支持批量重命名指定目录下的文件，加前缀/后缀/序号"
+project_type: cli
+template: grad_project
+
+steps:
+  - skill: dev-requirement
+    expected_outputs: [REQUIREMENT.md]
+    min_size: 200
+    required_sections:
+      REQUIREMENT.md:
+        - "项目类型"
+        - "功能需求"
+    assertions:
+      project_type_field: cli
+
+  - skill: dev-design
+    expected_outputs: [DESIGN.md]
+    min_size: 400
+    required_sections:
+      DESIGN.md:
+        - "目录结构"
+        - "命令参数"
+        - "子命令结构"
+    assertions:
+      no_placeholder_in_tree: true
+
+  - skill: dev-code
+    expected_outputs: [code/RUN.md]
+    required_files:
+      - code/main.py
+      - code/RUN.md
+    assertions:
+      run_md_has_executable_cmd: true
+      run_md_has_help: true

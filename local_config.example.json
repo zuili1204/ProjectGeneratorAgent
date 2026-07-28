@@ -1,0 +1,17 @@
+{
+  "llm_model": "deepseek-chat",
+  "llm_base_url": "https://api.deepseek.com/v1",
+  "llm_api_key": "sk-your-api-key-here",
+  "llm_timeout": "600",
+  "llm_temperature": "0.7",
+  "llm_max_tokens": "8192",
+  "llm_max_retries": "3",
+  "llm_retry_base_delay": "2.0",
+  "llm_retry_max_delay": "30.0",
+  "llm_context_window": "32768",
+  "agent_max_iter": "30",
+  "checkpoint_timeout": "600",
+  "server_allowed_origins": "http://localhost:*,http://127.0.0.1:*",
+  "server_max_concurrent_workflows": "2",
+  "server_enable_auth": "true"
+}

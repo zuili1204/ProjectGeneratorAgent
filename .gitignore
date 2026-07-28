@@ -1,0 +1,70 @@
+# === 敏感配置（含 API Key，切勿提交）===
+local_config.json
+.env
+*.env
+.env.local
+
+# === 工作区运行时数据（用户生成内容 / 日志 / 缓存）===
+# 用 workspaces/* 而非 workspaces/，以便 .gitkeep 占位文件可被提交
+workspaces/*
+!workspaces/.gitkeep
+
+# === 评估历史（含工作流产出引用）===
+tests/judge_history.jsonl
+
+# === Python 缓存与构建产物 ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# === 测试 / 类型检查缓存 ===
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# === 虚拟环境 ===
+.venv/
+venv/
+env/
+.python-version
+
+# === Node.js ===
+node_modules/
+npm-cache/
+package-lock.json
+yarn.lock
+
+# === IDE / 编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# === 操作系统 ===
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# === 临时 / 备份文件 ===
+*.bak
+*.tmp
+*.tmp.*
+*.log
+*.old
+*.orig
+
+# === Trae / AI 工具临时文件 ===
+.trae-cn/
+*.trae

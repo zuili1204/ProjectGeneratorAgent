@@ -1,0 +1,52 @@
+# 纯脚本工作流模板
+# 适用于：数据清洗 / 定时抓取 / 批处理 / 自动化小工具
+# 跳过 dev-design 的重型架构设计，只做需求 → 编码 → 自测
+
+name: 纯脚本生成
+template_key: script_only
+pipeline_skill: dev-requirement
+
+default_project_type: script
+
+sub_steps:
+  - skill_name: dev-requirement
+    display_name: 需求分析
+    has_checkpoint: true
+    checkpoint_type: approve
+    primary_output: REQUIREMENT.md
+    min_size: 200
+    required_companions: []
+
+  - skill_name: dev-design
+    display_name: 系统设计
+    has_checkpoint: false
+    checkpoint_type: null
+    primary_output: DESIGN.md
+    min_size: 300
+    required_companions: []
+
+  - skill_name: dev-code
+    display_name: 编码实现
+    has_checkpoint: true
+    checkpoint_type: approve
+    primary_output: RUN.md
+    min_size: 100
+    required_companions_dynamic: true   # script 类型只需 code/main.py + RUN.md
+
+  - skill_name: dev-selfcheck
+    display_name: 自测验证
+    has_checkpoint: false
+    checkpoint_type: null
+    primary_output: SELF_CHECK.md
+    min_size: 100
+    required_companions: []
+
+  # 可选评审：默认关闭，params 里 enable_review=true 才启用
+  - skill_name: dev-review
+    display_name: 代码评审
+    has_checkpoint: false
+    checkpoint_type: null
+    primary_output: REVIEW.md
+    min_size: 100
+    required_companions: []
+    when: enable_review == true

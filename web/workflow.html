@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工作流详情 — ProjectGeneratorAgent</title>
+  <link rel="icon" href="/icon.png" type="image/png">
+  <link rel="stylesheet" href="/assets/css/main.css">
+  <style>
+    .md-code { background: var(--bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
+    .md-inline { background: var(--bg); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Monaco, monospace; font-size: 0.9em; }
+    .output-content h2, .output-content h3, .output-content h4 { margin: 14px 0 8px; }
+    .output-content ul { margin: 8px 0; padding-left: 22px; }
+    .output-content p { margin: 8px 0; }
+    .workflow-detail-navbar { padding: 0 16px; gap: 12px; }
+    .breadcrumb { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+    .breadcrumb-title {
+      font-weight: 600; font-size: 14px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: var(--fg);
+    }
+    .terminal-toolbar { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--terminal-fg); }
+    .terminal-toolbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--terminal-green); }
+    .checkpoint-banner {
+      background: var(--warning-light);
+      border: 1px solid var(--warning);
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-size: 13px;
+    }
+    .checkpoint-banner .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <nav class="navbar workflow-detail-navbar">
+    <div class="breadcrumb">
+      <a href="/" class="btn btn-ghost btn-sm">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        返回
+      </a>
+      <img src="/icon.png" alt="PGA" style="width: 24px; height: 24px; border-radius: 5px;">
+      <span class="breadcrumb-title" id="wf-title">工作流</span>
+      <span class="status-badge" id="wf-status">加载中</span>
+    </div>
+    <div class="navbar-actions">
+      <span class="text-sm text-mono text-muted" id="wf-id"></span>
+      <button class="btn btn-ghost btn-icon btn-sm" id="refresh-btn" title="刷新">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- 检查点提示横幅（仅当等待检查点时显示） -->
+  <div class="page-container" style="padding-top: 12px; padding-bottom: 0;" id="checkpoint-banner-container"></div>
+
+  <!-- 三栏布局 -->
+  <div class="workflow-detail-layout">
+    <!-- 左栏：步骤时间轴 -->
+    <div class="steps-panel">
+      <h3>执行进度</h3>
+      <div class="timeline" id="timeline">
+        <div class="empty-state" style="padding: 20px;">
+          <div class="empty-state-text">加载中...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 中栏：产物展示 -->
+    <div class="output-panel">
+      <div class="output-header">
+        <span class="text-mono text-sm" id="active-file-name" style="color: var(--fg-muted);">未选择文件</span>
+        <span class="text-sm text-muted" id="active-file-size"></span>
+      </div>
+      <div class="output-content" id="output-content">
+        <div class="output-empty">
+          <div>
+            <div style="font-size: 32px; margin-bottom: 8px;">📄</div>
+            <div>从右下角文件列表选择文件查看内容</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右栏：日志 + 文件列表 -->
+    <div class="right-panel">
+      <!-- 终端日志 -->
+      <div class="terminal">
+        <div class="terminal-header">
+          <div class="terminal-title">
+            <div class="terminal-dots">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+            </div>
+            <span>实时日志</span>
+          </div>
+          <div class="terminal-toolbar">
+            <span class="dot" id="ws-indicator" style="background: var(--fg-subtle);"></span>
+            <span id="ws-status">未连接</span>
+          </div>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+          <div class="log-line level-info">
+            <span class="log-message">等待连接...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 文件列表 -->
+      <div class="file-list-panel">
+        <h3>
+          <span>产出文件</span>
+          <span class="text-sm text-muted" id="file-count">0</span>
+        </h3>
+        <div class="file-list" id="file-list">
+          <div class="empty-state" style="padding: 20px;">
+            <div class="empty-state-text">暂无文件</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/js/api.js"></script>
+  <script src="/assets/js/workflow.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# 黄金用例：定时抓取脚本（script）
+# 用于验证 Python 脚本生成，重点测输入输出格式与触发方式
+
+name: crawler
+description: 定时抓取网页标题并导出 CSV 的脚本（验证 script 类型约束）
+requirement: "写一个 Python 脚本，定时抓取一组 URL 的网页标题，导出为 CSV 文件"
+project_type: script
+template: script_only
+
+steps:
+  - skill: dev-requirement
+    expected_outputs: [REQUIREMENT.md]
+    min_size: 200
+    required_sections:
+      REQUIREMENT.md:
+        - "项目类型"
+        - "功能需求"
+        - "触发方式"
+    assertions:
+      project_type_field: script
+
+  - skill: dev-design
+    expected_outputs: [DESIGN.md]
+    min_size: 300
+    required_sections:
+      DESIGN.md:
+        - "目录结构"
+        - "输入格式"
+        - "输出格式"
+        - "错误处理"
+    assertions:
+      no_placeholder_in_tree: true
+
+  - skill: dev-code
+    expected_outputs: [code/RUN.md]
+    required_files:
+      - code/main.py
+      - code/RUN.md
+    assertions:
+      run_md_has_executable_cmd: true
+      has_main_guard: true

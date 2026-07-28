@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ProjectGeneratorAgent — 一句话生成项目</title>
+  <link rel="icon" href="/icon.png" type="image/png">
+  <link rel="stylesheet" href="/assets/css/main.css">
+  <style>
+    .tech-stack-group {
+      display: none;
+      padding: 12px;
+      background: var(--bg);
+      border-radius: var(--radius);
+      margin-top: 8px;
+    }
+    .tech-stack-group.active { display: block; }
+    .tech-stack-row {
+      display: grid;
+      grid-template-columns: 90px 1fr;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .tech-stack-row label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--fg-muted);
+    }
+    .tech-stack-row select {
+      padding: 6px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elevated);
+      font-size: 13px;
+    }
+    .chip-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      padding: 5px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-elevated);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      user-select: none;
+    }
+    .chip:hover { border-color: var(--primary); }
+    .chip.active {
+      background: var(--primary-light);
+      border-color: var(--primary);
+      color: var(--primary);
+      font-weight: 600;
+    }
+    .design-style-desc { display: none; }
+    .design-style-desc.active { display: block; }
+  </style>
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <nav class="navbar">
+    <div class="navbar-brand">
+      <img src="/icon.png" alt="PGA" style="width: 28px; height: 28px; border-radius: 6px;">
+      <span>ProjectGeneratorAgent</span>
+    </div>
+    <div class="navbar-actions">
+      <button class="btn btn-ghost btn-icon" id="refresh-btn" title="刷新">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      </button>
+      <a href="/settings.html" class="btn btn-ghost btn-icon" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </a>
+    </div>
+  </nav>
+
+  <div class="page-container">
+    <div class="home-layout">
+      <!-- 左侧：创建工作流 -->
+      <div class="card">
+        <div class="card-header">
+          <span>🚀 启动新工作流</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label class="form-label">一句话需求</label>
+            <textarea class="form-textarea" id="req-title" rows="3"
+              placeholder="例：做一个带用户登录的待办事项 Web 应用"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">项目类型</label>
+            <select class="form-select" id="req-project-type">
+              <option value="fullstack">全栈 Web 应用（前端+后端+数据库）</option>
+              <option value="frontend_only">纯前端页面（静态站/交互页面）</option>
+              <option value="cli">命令行工具（CLI 程序）</option>
+              <option value="script">Python 脚本（自动化/小工具）</option>
+            </select>
+          </div>
+
+          <!-- 基于项目类型的细分选项 -->
+          <div class="form-group">
+            <label class="form-label">技术栈</label>
+
+            <!-- fullstack -->
+            <div class="tech-stack-group" id="ts-fullstack">
+              <div class="tech-stack-row">
+                <label>前端框架</label>
+                <div class="chip-group" data-name="frontend_framework">
+                  <span class="chip active" data-val="React">React</span>
+                  <span class="chip" data-val="Vue">Vue</span>
+                  <span class="chip" data-val="纯HTML+JS">纯HTML+JS</span>
+                </div>
+              </div>
+              <div class="tech-stack-row">
+                <label>后端框架</label>
+                <div class="chip-group" data-name="backend_framework">
+                  <span class="chip active" data-val="FastAPI">FastAPI</span>
+                  <span class="chip" data-val="Flask">Flask</span>
+                  <span class="chip" data-val="Node-Express">Node-Express</span>
+                </div>
+              </div>
+              <div class="tech-stack-row">
+                <label>数据库</label>
+                <div class="chip-group" data-name="database">
+                  <span class="chip active" data-val="SQLite">SQLite</span>
+                  <span class="chip" data-val="MySQL">MySQL</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- frontend_only -->
+            <div class="tech-stack-group" id="ts-frontend_only">
+              <div class="tech-stack-row">
+                <label>前端框架</label>
+                <div class="chip-group" data-name="frontend_framework">
+                  <span class="chip active" data-val="React">React</span>
+                  <span class="chip" data-val="Vue">Vue</span>
+                  <span class="chip" data-val="纯HTML+JS">纯HTML+JS</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- cli -->
+            <div class="tech-stack-group" id="ts-cli">
+              <div class="tech-stack-row">
+                <label>编程语言</label>
+                <div class="chip-group" data-name="language">
+                  <span class="chip active" data-val="Python">Python</span>
+                  <span class="chip" data-val="Node">Node</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- script -->
+            <div class="tech-stack-group" id="ts-script">
+              <div class="tech-stack-row">
+                <label>编程语言</label>
+                <div class="chip-group" data-name="language">
+                  <span class="chip active" data-val="Python">Python</span>
+                  <span class="chip" data-val="Node">Node</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">设计风格</label>
+            <select class="form-select" id="req-design-style">
+              <option value="auto">系统自动 — AI按项目选</option>
+              <option value="minimal">极简专业 — 工具/SaaS</option>
+              <option value="tech">科技感 — 深色/开发者</option>
+              <option value="colorful">活泼多彩 — 消费级</option>
+              <option value="elegant">优雅留白 — 展示/高端</option>
+              <option value="retro">复古 — 怀旧/个性</option>
+              <option value="custom">自定义 — 文字描述</option>
+            </select>
+            <textarea class="form-textarea design-style-desc" id="req-design-style-desc" rows="2"
+              style="margin-top: 8px;"
+              placeholder="描述你想要的设计风格，如：蓝白配色、卡片式布局、圆角元素"></textarea>
+          </div>
+
+          <div class="form-group">
+            <label class="form-checkbox">
+              <input type="checkbox" id="req-checkpoint" checked>
+              <span>开启检查点（每步暂停审核）</span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="form-checkbox">
+              <input type="checkbox" id="req-auto">
+              <span>自动继续（不暂停）</span>
+            </label>
+          </div>
+
+          <button class="btn btn-primary" id="start-btn" style="width: 100%; justify-content: center; padding: 11px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            启动工作流
+          </button>
+        </div>
+      </div>
+
+      <!-- 右侧：工作流列表 -->
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <h2 style="margin: 0; font-size: 16px;">工作流列表</h2>
+          <span class="text-sm text-muted" id="workflow-count"></span>
+        </div>
+        <div class="workflow-list" id="workflow-list">
+          <div class="empty-state">
+            <div class="empty-state-icon">∅</div>
+            <div class="empty-state-text">暂无工作流，从左侧创建一个吧</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/js/api.js"></script>
+  <script src="/assets/js/app.js"></script>
+</body>
+</html>

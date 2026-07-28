@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设置 — ProjectGeneratorAgent</title>
+  <link rel="icon" href="/icon.png" type="image/png">
+  <link rel="stylesheet" href="/assets/css/main.css">
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <nav class="navbar">
+    <div class="navbar-brand">
+      <a href="/" class="btn btn-ghost btn-sm">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        返回
+      </a>
+      <img src="/icon.png" alt="PGA" style="width: 28px; height: 28px; border-radius: 6px;">
+      <span>设置</span>
+    </div>
+    <div class="navbar-actions">
+      <button class="btn btn-primary btn-sm" id="save-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+        保存全部
+      </button>
+    </div>
+  </nav>
+
+  <div class="settings-container">
+    <!-- LLM 配置 -->
+    <div class="settings-section">
+      <h2>LLM 配置</h2>
+      <p>配置 LLM API 的访问参数，支持任意 OpenAI 兼容后端（DeepSeek / Qwen / Moonshot / OpenAI / 本地 vLLM）。</p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">API 地址 (base_url)</label>
+          <input type="text" class="form-input" id="cfg-llm_base_url" placeholder="https://api.deepseek.com/v1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">模型名 (model)</label>
+          <input type="text" class="form-input" id="cfg-llm_model" placeholder="deepseek-chat">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">API Key</label>
+        <input type="password" class="form-input" id="cfg-llm_api_key" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off">
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">超时秒数 (timeout)</label>
+          <input type="number" class="form-input" id="cfg-llm_timeout" placeholder="600" min="10" max="3600">
+        </div>
+        <div class="form-group">
+          <label class="form-label">温度 (temperature)</label>
+          <input type="number" class="form-input" id="cfg-llm_temperature" placeholder="0.7" min="0" max="2" step="0.1">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">最大 tokens (max_tokens)</label>
+        <input type="number" class="form-input" id="cfg-llm_max_tokens" placeholder="8192" min="256" max="32768">
+      </div>
+    </div>
+
+    <!-- 工作流配置 -->
+    <div class="settings-section">
+      <h2>工作流配置</h2>
+      <p>控制工作流的执行行为，可被创建工作流时的参数覆盖。</p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Agent 最大迭代次数</label>
+          <input type="number" class="form-input" id="cfg-agent_max_iter" placeholder="30" min="5" max="200">
+        </div>
+        <div class="form-group">
+          <label class="form-label">检查点超时（秒）</label>
+          <input type="number" class="form-input" id="cfg-checkpoint_timeout" placeholder="600" min="60" max="86400">
+        </div>
+      </div>
+    </div>
+
+    <!-- 预设后端 -->
+    <div class="settings-section">
+      <h2>常用后端预设</h2>
+      <p>点击下方按钮快速填入对应后端的配置（API Key 仍需手动填写）。</p>
+      <div class="flex gap-2" style="flex-wrap: wrap;">
+        <button class="btn btn-sm preset-btn" data-base="https://api.deepseek.com/v1" data-model="deepseek-chat">DeepSeek</button>
+        <button class="btn btn-sm preset-btn" data-base="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">通义千问</button>
+        <button class="btn btn-sm preset-btn" data-base="https://api.moonshot.cn/v1" data-model="moonshot-v1-32k">Moonshot</button>
+        <button class="btn btn-sm preset-btn" data-base="https://api.openai.com/v1" data-model="gpt-4o">OpenAI</button>
+        <button class="btn btn-sm preset-btn" data-base="http://localhost:8000/v1" data-model="custom">本地 vLLM</button>
+      </div>
+    </div>
+
+    <!-- 配置文件路径 -->
+    <div class="settings-section">
+      <h2>配置文件</h2>
+      <p>配置持久化在用户主目录下的 JSON 文件中，也可手动编辑。</p>
+      <div class="form-group">
+        <label class="form-label">配置文件路径</label>
+        <input type="text" class="form-input" id="cfg-path" readonly>
+      </div>
+    </div>
+  </div>
+
+  <script src="/assets/js/api.js"></script>
+  <script src="/assets/js/settings.js"></script>
+</body>
+</html>
