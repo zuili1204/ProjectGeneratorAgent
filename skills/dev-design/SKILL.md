@@ -1,180 +1,228 @@
 ---
 name: dev-design
-version: 1.0.0
+version: 1.4.0
+description: Use when REQUIREMENT.md exists and a buildable design blueprint is needed before coding — produces DESIGN.md (architecture, file-level tree, data model, interfaces, task list) plus DESIGN_SYSTEM.md (semantic color/typography/spacing/motion tokens) that dev-code consumes directly
 inputs: [$ARGUMENTS]
-outputs: [DESIGN.md]
+outputs: [DESIGN.md, DESIGN_SYSTEM.md]
 depends_on: [REQUIREMENT.md]
-est_tokens: 5000
-est_iters: 10
+est_tokens: 6000
+est_iters: 12
 ---
 
-# 系统设计 (dev-design)
+# System Design (dev-design)
 
-## 任务目标
+## Overview
 
-基于 `REQUIREMENT.md` 产出 `DESIGN.md`，作为「一句话生成项目」工作流的第二步。设计文档需明确项目类型、技术栈、架构图、目录结构（文件级）、模块划分、数据模型、接口设计、页面路由、关键流程等，为后续 `dev-code` 步骤提供可直接落地的施工蓝图。本步骤只做系统设计，不写任何实现级代码。
+**Core principle:** Produce a buildable, file-level design blueprint that dev-code can follow directly. Design only — no implementation-level code.
 
-## 输入
+## Objective
 
-- `$ARGUMENTS`：用户原始需求（仅作参考，不作为唯一依据）
-- 工作区已有文件（必读 `REQUIREMENT.md`，其中应已声明 `project_type`、技术栈、功能列表）
-- 若工作区存在旧版 `DESIGN.md`，用 `list_files` / `read_file` 判断后按增量覆盖
+Based on `REQUIREMENT.md`, produce `DESIGN.md` as the second step of the "one-sentence-to-project" workflow. The design document must specify project type, tech stack, architecture diagram, directory structure (file-level), module breakdown, data model, interface design, page routes, key flows, and a structured task list — providing a directly buildable construction blueprint for the subsequent `dev-code` step. This step does system design only and writes no implementation-level code.
 
-## 前置校验
+> **v1.1 change**: upgraded "development sequence" prose into a **mandatory structured task list (Task list)**. Adapted from superpowers plan-driven development: each Task has Files / Interfaces / checkable Steps (write failing test → verify fail → write impl → verify pass → commit). dev-code executes the Task list strictly, running verification between Tasks — a failure does not advance to the next Task.
 
-进入正式设计前必须完成以下校验，任一不通过则终止并给出原因，不产出空文档：
+## Inputs
 
-1. **REQUIREMENT.md 存在性检查**：用 `read_file` 读取工作区根目录的 `REQUIREMENT.md`。若文件不存在或为空，立即终止，提示「REQUIREMENT.md 缺失，请先执行 dev-requirement 步骤」，不调用 `write_file`。
-2. **project_type 解析**：从 `REQUIREMENT.md` 中解析 `project_type` 字段，取值必须为 `fullstack` / `frontend_only` / `cli` / `script` 四者之一。若缺失或取值非法，终止并提示具体问题。
-3. **技术栈解析**：从 `REQUIREMENT.md` 中解析技术栈选型（前端框架 / 后端框架 / 数据库 / 编程语言），记录每一项以备后续设计对齐。若技术栈字段缺失，终止并提示。
-4. **功能列表解析**：确认 `REQUIREMENT.md` 中存在 P0 / P1 / P2 功能需求，且 P0 非空。若 P0 为空，终止并提示。
-5. **技术栈与项目类型匹配性预检**：快速校验技术栈与项目类型是否自洽（如 `cli` 不应出现 web 前端框架、`frontend_only` 不应出现数据库）。若不自洽，按 REQUIREMENT.md 为准并在设计文档中显式标注假设，不回退提问。
+- `$ARGUMENTS`: the user's original request (reference only, not the sole basis)
+- Existing workspace files (MUST read `REQUIREMENT.md`, which should declare `project_type`, tech stack, feature list)
+- If an existing `DESIGN.md` is present, use `list_files` / `read_file` to detect it and update incrementally
 
-## 执行步骤
+## Pre-checks
 
-按顺序执行以下 10 步，每一步的产物都将进入最终的 `DESIGN.md`：
+Before formal design, complete the following checks. If any fails, terminate with a reason and do not produce an empty document:
 
-1. **确认项目类型与技术栈**：复述 REQUIREMENT.md 中的 `project_type` 与技术栈选型，作为整份设计文档的基准；任何后续设计不得偏离此基准。
-2. **绘制架构图**：依据项目类型绘制系统架构图，优先使用 Mermaid（`graph TD` / `flowchart`），回退 ASCII。架构图须体现主要模块、数据流向、外部依赖。
-3. **设计文件级目录结构**：给出 tree 图，精确到具体文件名（含扩展名），禁止使用 `...` 或「省略」占位。dev-code 步骤将照此创建文件骨架。
-4. **划分模块与职责**：列出核心模块，每个模块一段，说明职责、输入、输出、依赖关系。
-5. **设计数据模型**：列出实体、字段名、类型、约束（主键 / 外键 / 非空 / 唯一 / 默认值）、实体间关系。给出 ER 图（Mermaid `erDiagram`）或表结构表。无持久化的项目类型显式声明「无持久化」。
-6. **技术栈详解**：按命中的技术栈逐项展开设计要素（参见「工程规范 - 技术栈适配」），说明框架特性如何映射到本项目的模块与流程。
-7. **按项目类型设计接口 / 路由 / 命令 / IO**：
-   - `fullstack`：API 接口表（path / method / 请求体 / 响应体 / 状态码 / 鉴权）
-   - `frontend_only`：页面路由表（URL / 组件 / 数据来源 / 鉴权）
-   - `cli`：命令参数表 + 子命令结构 + 输出格式示例
-   - `script`：输入格式 + 处理流程图 + 输出格式 + 错误处理策略
-8. **描述关键流程**：用 Mermaid 时序图（`sequenceDiagram`）或流程图（`flowchart`）描述 1 个以上核心主流程（如用户登录、数据创建、命令执行）。
-9. **给出开发顺序建议**：为 dev-code 步骤排出施工顺序（入口文件 → 核心模块 → 工具类 → 配置 → 联调），每步说明依赖关系。
-10. **写出文档**：用 `write_file` 工具将 `DESIGN.md` 写到根目录，严格按「DESIGN.md 固定模板」组织章节。
+1. **REQUIREMENT.md existence**: use `read_file` to read `REQUIREMENT.md` at the workspace root. If missing or empty, terminate immediately with "REQUIREMENT.md missing, run dev-requirement first" and do NOT call `write_file`.
+2. **project_type parsing**: parse the `project_type` field from `REQUIREMENT.md`. The value MUST be one of `fullstack` / `frontend_only` / `cli` / `script`. If missing or invalid, terminate with the specific problem.
+3. **Tech stack parsing**: parse the tech stack selection from `REQUIREMENT.md` (frontend framework / backend framework / database / language) and record each item to align subsequent design. If the tech stack field is missing, terminate with the specific problem.
+4. **Feature list parsing**: confirm `REQUIREMENT.md` contains P0 / P1 / P2 functional requirements and P0 is non-empty. If P0 is empty, terminate with the specific problem.
+5. **Tech-stack vs project-type consistency**: quickly check whether the tech stack is self-consistent with the project type (e.g. `cli` should not have a web frontend framework; `frontend_only` should not have a database). If inconsistent, treat REQUIREMENT.md as authoritative and explicitly note the assumption in the design document. Do NOT fall back to asking.
 
-## 后置自检
+## Execution Steps
 
-在调用 `write_file` 之前与之后各做一次自检，缺失项必须补全后再交付：
+Execute the following 10 steps in order. Each step's output feeds into the final `DESIGN.md`:
 
-- 写入前自检（草稿完整性）：
-  - [ ] 架构图存在（Mermaid 或 ASCII），且与文字描述一致
-  - [ ] 目录结构精确到具体文件名，无 `...` 占位，可直接 `mkdir` / `touch`
-  - [ ] 数据模型含字段名、类型、约束、关系四要素（无持久化项目除外）
-  - [ ] 技术栈详解覆盖 REQUIREMENT.md 中声明的全部技术选型，无偏离
-  - [ ] 按项目类型给出的接口 / 路由 / 命令 / IO 表字段齐全
-  - [ ] 关键流程至少 1 张时序图或流程图
-  - [ ] 全文无实现级代码（仅 schema / 伪代码 / DDL 可保留）
-- 写入后自检（落盘一致性）：
-  - [ ] 用 `read_file` 重新读取 `DESIGN.md`，确认章节顺序与固定模板一致
-  - [ ] 确认无「强红线」违例（见下一节）
-  - [ ] 确认文档自包含，读者无需回看 REQUIREMENT.md 即可理解设计
-  - 任一缺失：回到对应步骤补全后再次 `write_file` 覆盖写入。
+1. **Confirm project type & tech stack**: restate the `project_type` and tech stack from REQUIREMENT.md as the baseline for the entire design document. No subsequent design may deviate from this baseline.
+2. **Draw architecture diagram**: based on project type, draw a system architecture diagram. Prefer Mermaid (`graph TD` / `flowchart`), fall back to ASCII. The diagram must show main modules, data flow, and external dependencies.
+3. **Design file-level directory structure**: provide a tree diagram precise down to specific file names (with extensions). Using `...` or "omitted" placeholders is FORBIDDEN. dev-code will create the file skeleton from this.
+4. **Module breakdown & responsibilities**: list core modules. One paragraph each: responsibility, input, output, dependencies.
+5. **Design data model**: list entities, field names, types, constraints (primary key / foreign key / not null / unique / default), and entity relationships. Provide an ER diagram (Mermaid `erDiagram`) or a table-structure table. For non-persistent project types, explicitly declare "no persistence".
+6. **Tech stack detail**: per matched tech stack, expand the design elements (see "Engineering Conventions - Tech Stack Adaptation") and explain how framework features map to this project's modules and flows.
+7. **Design interfaces / routes / commands / IO per project type**:
+   - `fullstack`: API table (path / method / request body / response body / status codes / auth)
+   - `frontend_only`: page route table (URL / component / data source / auth)
+   - `cli`: command arg table + subcommand structure + output format example
+   - `script`: input format + processing flow diagram + output format + error handling strategy
+8. **Describe key flows**: use Mermaid sequence diagrams (`sequenceDiagram`) or flowcharts (`flowchart`) to describe 1+ core main flows (e.g. user login, data creation, command execution).
+9. **Produce structured task list (Task list, red line)**: lay out an **executable task list** for the dev-code step. Each Task has Files / Interfaces / checkable Steps. Tasks have dependency order (entry file → core modules → utilities → config → tests → integration); a failure does not advance. Format strictly per "Engineering Conventions - Structured Task List Format". Replacing the task list with prose is FORBIDDEN.
+10. **Produce DESIGN_SYSTEM.md (frontend projects — red line)**: For `fullstack` / `frontend_only` projects, use `write_file` to write `DESIGN_SYSTEM.md` to the root, following the template in `references/design-system-template.md`. Select the industry color baseline from `references/industry-design-reasoning.md` based on the product type parsed in step 1. The design system MUST include:
+    - **Semantic color tokens** using the `--primary` / `--on-primary` / `--secondary` / `--on-secondary` / `--accent` / `--on-accent` / `--background` / `--foreground` / `--card` / `--card-foreground` / `--muted` / `--muted-foreground` / `--border` / `--destructive` / `--on-destructive` / `--ring` naming convention (NOT `--color-primary` or other ad-hoc names)
+    - **Light and dark mode** CSS variable blocks (`:root` and `[data-theme="dark"]`)
+    - **Typography pairing** selected from `_shared/typography-pairing.md` with Google Fonts `@import` URL and Tailwind config snippet
+    - **4/8dp spacing scale** (`--space-1` through `--space-20`)
+    - **Radius, shadow, and motion tokens**
+    - **WCAG contrast notes** for the chosen primary/foreground pairs
 
-## 指令约束
+    For `cli` / `script` projects with no UI, skip this step and explicitly declare "DESIGN_SYSTEM.md not applicable (no UI)" in DESIGN.md.
+11. **Write documents**: use `write_file` to write `DESIGN.md` to the root, strictly following the "DESIGN.md Fixed Template". Then, if step 10 applies, use `write_file` to write `DESIGN_SYSTEM.md` to the root.
 
-### 强红线（违反必须重写）
+## Post-checks
 
-- 目录结构必须精确到文件名（含扩展名），禁止使用 `...` 或任何占位符；dev-code 必须能照此直接创建文件骨架。
-- 必须包含架构图（Mermaid 或 ASCII），不得仅用文字描述代替。
-- 数据模型必须含字段名、类型、约束（主键 / 外键 / 非空 / 唯一 / 默认值至少给出约束类别），无持久化项目须显式声明。
-- 禁止写实现级代码：不写完整函数体、不写业务逻辑实现；仅允许保留 schema 定义、DDL 建表语句、伪代码、接口签名。
-- 禁止偏离 REQUIREMENT.md 中确定的技术栈：不得增删框架、不得替换数据库、不得引入 REQUIREMENT.md 未声明的主框架。
+Run a self-check before and after calling `write_file`. Missing items must be filled before delivery:
 
-### 建议项（鼓励但不强制）
+- Pre-write check (draft completeness):
+  - [ ] Architecture diagram exists (Mermaid or ASCII) and is consistent with the prose
+  - [ ] Directory structure is precise down to file names, no `...` placeholder, directly `mkdir` / `touch`-able
+  - [ ] Data model has all four elements: field name, type, constraint, relationship (except non-persistent projects)
+  - [ ] Tech stack detail covers every selection declared in REQUIREMENT.md, no deviation
+  - [ ] Interface / route / command / IO table fields are complete per project type
+  - [ ] At least 1 sequence diagram or flowchart for a key flow
+  - [ ] **Structured task list exists; each Task has Files / Interfaces / checkable Steps (write failing test + verify fail + write impl + verify pass + commit)**
+  - [ ] No implementation-level code anywhere (only schema / pseudocode / DDL allowed)
+  - [ ] **For frontend projects (fullstack / frontend_only): DESIGN_SYSTEM.md exists, containing semantic color tokens with the `--primary` / `--on-primary` naming convention, `:root` + `[data-theme="dark"]` blocks, typography `@import`, and spacing scale**
+- Post-write check (on-disk consistency):
+  - [ ] Re-read `DESIGN.md` with `read_file`, confirm section order matches the fixed template
+  - [ ] **Re-read `DESIGN_SYSTEM.md` (if applicable), confirm it contains `:root` and `[data-theme="dark"]` blocks with `--primary` token**
+  - [ ] Confirm no "Hard Constraints" violations (see below)
+  - [ ] Confirm the document is self-contained — a reader needs no access to REQUIREMENT.md to understand the design
+  - On any miss: go back to the relevant step, fill the gap, and `write_file` (overwrite) again.
 
-- 优先使用 Mermaid 画图（架构图、ER 图、时序图、流程图），ASCII 仅作回退。
-- API 接口建议给出请求 / 响应示例（JSON 片段或 schema 定义），便于 dev-code 直接落码。
-- 页面路由建议标注权限要求（是否需鉴权、所需角色），与 REQUIREMENT.md 的用户角色对齐。
-- 模块设计建议标注「对外暴露」与「内部实现」边界，降低 dev-code 的耦合风险。
-- 关键流程建议覆盖至少 1 个异常路径（如登录失败、数据校验失败）。
+## Hard Constraints (Red Lines — violation requires rewrite)
 
-## 工程规范
+- The directory structure MUST be precise down to file names (with extensions). Using `...` or any placeholder is FORBIDDEN. dev-code must be able to create the file skeleton directly from this.
+- An architecture diagram (Mermaid or ASCII) MUST be included. Replacing it with prose only is not allowed.
+- The data model MUST include field name, type, and constraint (at least a constraint category: primary key / foreign key / not null / unique / default). Non-persistent projects must explicitly declare so.
+- **A structured task list (Task list) MUST be produced. Replacing it with prose "development sequence" is FORBIDDEN. Each Task MUST have Files / Interfaces / checkable Steps.**
+- Implementation-level code is FORBIDDEN: no complete function bodies, no business logic. Only schema definitions, DDL `CREATE TABLE` statements, pseudocode, and interface signatures are allowed.
+- Deviating from the tech stack fixed in REQUIREMENT.md is FORBIDDEN: do not add/remove frameworks, swap databases, or introduce main frameworks not declared in REQUIREMENT.md.
+- **For `fullstack` / `frontend_only` projects, `DESIGN_SYSTEM.md` MUST be produced** with the semantic token naming convention (`--primary` / `--on-primary` / `--background` / `--foreground` / `--card` / `--border` / `--muted` / `--destructive` etc.). Ad-hoc naming like `--color-primary` is FORBIDDEN. For `cli` / `script` projects, explicitly declare "no UI" in DESIGN.md instead.
 
-### 各项目类型的设计侧重点
+## Recommendations (encouraged, not mandatory)
 
-按 `project_type` 对号入座，补充对应结构化设计：
+- Prefer Mermaid for diagrams (architecture, ER, sequence, flowchart); ASCII only as fallback.
+- API interfaces should include request / response examples (JSON snippets or schema) so dev-code can code directly.
+- Page routes should mark permission requirements (auth required, required roles), aligned with REQUIREMENT.md user roles.
+- Module design should mark the "exposed" vs "internal" boundary to reduce dev-code coupling risk.
+- Key flows should cover at least 1 exception path (e.g. login failure, validation failure).
 
-| 项目类型 | 设计侧重点 | 必含设计项 |
+## Engineering Conventions
+
+### Design Focus by Project Type
+
+Match `project_type` to the corresponding structured design:
+
+| Project type | Design focus | Required design items |
 | --- | --- | --- |
-| `fullstack` | 前后端边界、接口契约、数据模型、鉴权 | 前端架构 + 后端架构 + 数据库 ER 图 + API 接口表（路径 / 方法 / 请求 / 响应） |
-| `frontend_only` | 页面交互、视觉结构、状态管理、存储方案 | 页面路由表 + 组件树 + 状态管理方案 + 数据存储方案 |
-| `cli` | 子命令设计、参数解析、输入输出约定、退出码 | 命令参数表 + 子命令结构 + 输出格式示例 |
-| `script` | 输入来源、输出形式、错误处理、触发方式 | 输入格式 + 处理流程图 + 输出格式 + 错误处理策略 |
+| `fullstack` | frontend-backend boundary, API contracts, data model, auth | frontend architecture + backend architecture + DB ER diagram + API table (path / method / request / response) |
+| `frontend_only` | page interaction, visual structure, state management, storage | page route table + component tree + state management scheme + data storage scheme |
+| `cli` | subcommand design, arg parsing, IO conventions, exit codes | command arg table + subcommand structure + output format example |
+| `script` | input source, output form, error handling, trigger mode | input format + processing flow diagram + output format + error handling strategy |
 
-> 备注：若遇到 `backend_only`，参照 `fullstack` 的后端部分裁剪，前端架构章节省略。
+> Note: if `backend_only` is encountered, refer to the backend portion of `fullstack` and trim the frontend architecture section.
 
-各设计项的字段要求：
+Field requirements for each design item:
 
-- **前端架构**（fullstack / frontend_only）：组件分层（容器 / 展示 或 页面 / 业务 / 基础）、状态管理方案、路由方案。
-- **后端架构**（fullstack / backend_only）：分层设计（Controller / Service / Repository / Model）、中间件链、异常处理。
-- **数据库 ER 图**（fullstack）：Mermaid `erDiagram` + 表结构表（表名 / 字段 / 类型 / 约束 / 索引）。
-- **API 接口表**（fullstack / backend_only）：Method / Path / 说明 / 请求体 / 响应体 / 状态码 / 鉴权。
-- **页面路由表**（fullstack / frontend_only）：URL / 组件 / 数据来源 / 鉴权。
-- **组件树**（frontend_only）：Mermaid `graph` 或 ASCII 树，标注复用关系。
-- **状态管理方案**（frontend_only）：store 模块划分 + 关键 state 字段。
-- **数据存储方案**（frontend_only）：localStorage / IndexedDB / sessionStorage / 无 + 存储 key 设计。
-- **命令参数表**（cli）：参数名 / 类型 / 必填 / 默认值 / 说明。
-- **子命令结构**（cli）：主命令 + 子命令树 + usage 字符串。
-- **输出格式示例**（cli）：标准输出 / 标准错误、JSON / 表格、退出码对照表。
-- **输入格式**（script）：文件类型 / 路径约定 / 命令行参数 / 环境变量。
-- **处理流程图**（script）：Mermaid `flowchart` 或步骤列表。
-- **输出格式**（script）：输出文件 / 控制台格式 / 字段含义。
-- **错误处理策略**（script）：异常类型、重试策略、日志落盘策略。
+- **Frontend architecture** (fullstack / frontend_only): component layering (container / presentational or page / business / base), state management scheme, routing scheme.
+- **Backend architecture** (fullstack / backend_only): layering (Controller / Service / Repository / Model), middleware chain, exception handling.
+- **DB ER diagram** (fullstack): Mermaid `erDiagram` + table-structure table (table / fields / types / constraints / indexes).
+- **API table** (fullstack / backend_only): Method / Path / description / request body / response body / status codes / auth.
+- **Page route table** (fullstack / frontend_only): URL / component / data source / auth.
+- **Component tree** (frontend_only): Mermaid `graph` or ASCII tree, marking reuse relations.
+- **State management scheme** (frontend_only): store module breakdown + key state fields.
+- **Data storage scheme** (frontend_only): localStorage / IndexedDB / sessionStorage / none + storage key design.
+- **Command arg table** (cli): arg name / type / required / default / description.
+- **Subcommand structure** (cli): main command + subcommand tree + usage string.
+- **Output format example** (cli): stdout / stderr, JSON / table, exit code table.
+- **Input format** (script): file type / path convention / CLI args / env vars.
+- **Processing flow diagram** (script): Mermaid `flowchart` or step list.
+- **Output format** (script): output file / console format / field meanings.
+- **Error handling strategy** (script): exception types, retry strategy, log persistence strategy.
 
-### 技术栈适配
+### Tech Stack Adaptation
 
-针对常见技术栈，设计文档需要额外补充以下要素（按实际选型命中即可）：
+For common tech stacks, the design document must additionally cover the following elements (apply per actual selection):
 
-#### 前端
+#### Frontend
 
-- **React**：组件设计（容器组件 / 展示组件分层）、核心 hooks 使用（`useState` / `useEffect` / `useMemo` / `useReducer` 等，说明用途）、状态管理方案（Context / Zustand / Redux Toolkit 任选其一，说明理由与 store 模块划分）。
-- **Vue**：Composition API 组合式函数设计（`setup` / 自定义 composables）、响应式数据策略（`ref` / `reactive` / `computed` 的使用边界）、Pinia 状态模块设计（store 划分 + 关键 state）。
-- **纯 HTML + JS**：模块化方案（ES Module / IIFE / 原生，说明选择理由）、DOM 操作策略（事件委托 / 模板渲染 / 数据驱动）、状态与视图同步方式。
+- **React**: component design (container / presentational layering), core hooks usage (`useState` / `useEffect` / `useMemo` / `useReducer` etc., state purpose), state management scheme (Context / Zustand / Redux Toolkit — pick one, state rationale and store module breakdown).
+- **Vue**: Composition API composable design (`setup` / custom composables), reactivity strategy (boundaries of `ref` / `reactive` / `computed`), Pinia state module design (store breakdown + key state).
+- **Pure HTML + JS**: modularization scheme (ES Module / IIFE / native — state rationale), DOM manipulation strategy (event delegation / template rendering / data-driven), state-view sync approach.
 
-#### 后端
+#### Backend
 
-- **FastAPI**：路由设计（按 `APIRouter` 分组，列出分组与归属接口）、Pydantic 模型（`BaseModel` 入参 / 出参 schema 定义）、依赖注入（`Depends` 的使用场景，如鉴权 / 数据库会话）、中间件与异常处理器（CORS / 日志 / 全局异常）。
-- **Flask**：蓝图设计（`Blueprint` 模块拆分，列出蓝图与归属路由）、SQLAlchemy 模型（模型类定义 + 关系映射）、配置管理（环境变量 / 配置类）、模板渲染策略（Jinja2 模板划分，如适用）。
-- **Node + Express**：中间件链设计（日志 / 鉴权 / 错误处理，注明顺序与职责）、路由设计（按资源分 `Router`，列出路由文件与归属端点）、错误处理（统一错误中间件 + 错误码约定）。
+- **FastAPI**: routing design (group by `APIRouter`, list groups and their endpoints), Pydantic models (`BaseModel` request / response schema), dependency injection (`Depends` use cases, e.g. auth / DB session), middleware & exception handlers (CORS / logging / global exception).
+- **Flask**: blueprint design (`Blueprint` module split, list blueprints and their routes), SQLAlchemy models (model class definitions + relationship mapping), config management (env vars / config class), template rendering strategy (Jinja2 template split, if applicable).
+- **Node + Express**: middleware chain design (logging / auth / error handling — note order and responsibility), routing design (split `Router` by resource, list route files and their endpoints), error handling (unified error middleware + error code convention).
 
-#### 数据库
+#### Database
 
-- **SQLite**：表结构设计（字段 / 类型 / 主外键 / 默认值），给出 DDL 建表语句（`CREATE TABLE`）。
-- **MySQL**：表结构设计 + 索引设计（主键索引、唯一索引、联合索引及命中场景说明）+ 字符集与存储引擎说明（如 `utf8mb4` / `InnoDB`），给出 DDL 建表语句。
+- **SQLite**: table structure design (fields / types / primary & foreign keys / defaults), provide DDL (`CREATE TABLE`).
+- **MySQL**: table structure design + index design (primary index, unique index, composite index and hit scenarios) + charset & storage engine (e.g. `utf8mb4` / `InnoDB`), provide DDL.
 
-### DESIGN.md 固定模板
+### Structured Task List Format
 
-文档必须严格按以下章节顺序组织，章节标题不得调换或省略：
+The dev-code step will **execute strictly in this Task list order**, running verification commands between Tasks — a failure does not advance. Each Task MUST have Files / Interfaces / checkable Steps. Format:
 
-1. **项目概述**：一句话目标 + 项目类型 + 技术栈摘要（复述 REQUIREMENT.md 基准）。
-2. **架构图**：系统架构图（Mermaid 优先，ASCII 回退），标注主要模块与数据流向。
-3. **目录结构**：文件级 tree 图，精确到文件名，禁止 `...` 占位。
-4. **数据模型**：实体 + 字段名 + 类型 + 约束 + 关系，附 ER 图或表结构表（无持久化则声明）。
-5. **技术栈详解**：按命中的技术栈逐项展开设计要素（参见「技术栈适配」）。
-6. **接口 / 路由 / 命令设计**（按项目类型）：
-   - `fullstack`：API 接口表 + 前后端联调契约（统一响应格式、错误码、CORS）
-   - `frontend_only`：页面路由表 + 组件树 + 状态管理方案 + 数据存储方案
-   - `cli`：命令参数表 + 子命令结构 + 输出格式示例 + 退出码约定
-   - `script`：输入格式 + 处理流程图 + 输出格式 + 错误处理策略
-7. **关键流程**：1 张以上 Mermaid 时序图或流程图，覆盖核心主流程。
-8. **开发顺序建议**：为 dev-code 排出施工顺序，每步说明依赖关系。
+```markdown
+### Task 1: [component name, e.g. app entry & /health endpoint]
+**Files:** Create code/backend/main.py / Test code/tests/test_main.py
+**Interfaces:** Produces app factory `create_app() -> FastAPI`, exposes `GET /health`
+- [ ] Step 1: write failing test [provide real test code snippet for test_main.py]
+- [ ] Step 2: run test, confirm fail [command `pytest code/tests/test_main.py -v` + expected failure reason]
+- [ ] Step 3: write minimal implementation [provide real impl code snippet for main.py]
+- [ ] Step 4: run test, confirm pass [command + expected exit_code 0]
+- [ ] Step 5: commit [git commit -m "task1: app entry + /health"]
 
-## 工具与异常
+### Task 2: [next component depending on Task 1]
+**Files:** ...
+**Interfaces:** ...
+- [ ] Step 1: ...
+...
+```
 
-- `list_files`：查看工作区已有文件，判断是否首次执行、是否存在旧版 DESIGN.md。
-- `read_file`：读取 `REQUIREMENT.md`（必读）；读取已有 DESIGN.md（增量场景）；后置自检时重新读取落盘文件。
-- `write_file`：将最终 `DESIGN.md` 写入根目录；后置自检发现缺失时，补全后用 `write_file` 覆盖写入。
-- 本步骤不使用 `run_command`，不做任何代码执行或编译。
-- 异常处理：
-  - 若 `REQUIREMENT.md` 不存在或为空：终止，不写文件，返回提示。
-  - 若 `project_type` 缺失或取值非法：终止，提示具体问题，不回退提问。
-  - 若技术栈与项目类型不自洽：以 REQUIREMENT.md 为准，在设计文档中显式标注假设。
-  - 若后置自检发现强红线违例：回到对应步骤修正后重新 `write_file`，禁止带病交付。
+Task granularity requirements:
+- Each Task corresponds to one independently verifiable functional unit (one component / a group of endpoints / one page). Do not cram the whole project into one Task.
+- Recommended Task count: 3-8. Too few = too coarse (cannot locate failures); too many = too fine (commit noise).
+- The Files field MUST list the files created/modified by this Task (including test files), using `code/`-relative paths.
+- The Interfaces field describes the Task's exposed interfaces (function signature / route / command) for downstream Tasks to reference.
+- Steps MUST include the five steps "write failing test → verify fail → write impl → verify pass → commit". Flexible TDD allows non-strict red-green order, but the test artifact and verification command are NOT optional.
+- The first Task MUST be the entry file + smoke test (so the project can run); subsequent Tasks stack features on top.
 
-## 关键约束
+### DESIGN.md Fixed Template
 
-- 只写设计文档，不写实现级代码（不写完整函数体、不写业务逻辑实现）。
-- 文档必须自包含，读者无需回看 REQUIREMENT.md 即可理解设计。
-- 目录结构要可直接落地（dev-code 步骤会按此创建文件骨架），禁止 `...` 占位。
-- 接口 / 路由 / 命令设计要给出具体的 path、method、参数，不要泛泛而谈。
-- 技术栈只能沿用 REQUIREMENT.md 中确定的选型，不得增删或替换主框架。
-- 设计粒度要到「文件级」，dev-code 应能照此直接生成文件骨架。
-- 全文使用中文，不使用 emoji。
-- 若 REQUIREMENT.md 中存在模糊处，按「最小可行假设」在设计文档中显式标注假设，不要回退提问。
+The document MUST strictly follow this section order. Section titles must not be swapped or omitted:
+
+1. **Project Overview**: one-sentence goal + project type + tech stack summary (restate the REQUIREMENT.md baseline).
+2. **Architecture Diagram**: system architecture diagram (Mermaid preferred, ASCII fallback), marking main modules and data flow.
+3. **Directory Structure**: file-level tree diagram, precise to file names, no `...` placeholder.
+4. **Data Model**: entities + field names + types + constraints + relationships, with ER diagram or table-structure table (declare "no persistence" if none).
+5. **Tech Stack Detail**: expand design elements per matched tech stack (see "Tech Stack Adaptation").
+6. **Interface / Route / Command Design** (by project type):
+   - `fullstack`: API table + frontend-backend integration contract (unified response format, error codes, CORS)
+   - `frontend_only`: page route table + component tree + state management scheme + data storage scheme
+   - `cli`: command arg table + subcommand structure + output format example + exit code convention
+   - `script`: input format + processing flow diagram + output format + error handling strategy
+7. **Key Flows**: 1+ Mermaid sequence diagram or flowchart covering core main flows.
+8. **Structured Task List**: an executable Task list for dev-code, each Task with Files / Interfaces / checkable Steps. Format per "Engineering Conventions - Structured Task List Format".
+
+## Tools & Error Handling
+
+- `list_files`: inspect existing workspace files, determine first-run vs incremental, check for an existing DESIGN.md.
+- `read_file`: read `REQUIREMENT.md` (required); read existing DESIGN.md (incremental case); re-read the on-disk file during post-check.
+- `write_file`: write the final `DESIGN.md` to the root; on post-check misses, fill gaps and `write_file` (overwrite).
+- This step does NOT use `run_command` — no code execution or compilation.
+- Error handling:
+  - If `REQUIREMENT.md` is missing or empty: terminate, write no file, return a prompt.
+  - If `project_type` is missing or invalid: terminate with the specific problem. Do NOT fall back to asking.
+  - If the tech stack is inconsistent with the project type: treat REQUIREMENT.md as authoritative and explicitly note the assumption in the design document.
+  - If a post-check finds a red-line violation: go back to the relevant step, fix, and re-`write_file`. Never ship a defective document.
+
+## Key Constraints
+
+- Design document only — no implementation-level code (no complete function bodies, no business logic).
+- The document MUST be self-contained — a reader needs no access to REQUIREMENT.md to understand the design.
+- The directory structure must be directly buildable (dev-code creates the file skeleton from it). `...` placeholders are FORBIDDEN.
+- Interface / route / command design must give concrete path, method, params — no vague generalities.
+- The tech stack may only follow what is fixed in REQUIREMENT.md — do not add/remove or swap main frameworks.
+- Design granularity must reach "file level" — dev-code should generate the file skeleton directly from this.
+- **Output language: Chinese (中文).** Although this skill instruction is in English, ALL generated project artifacts — DESIGN.md content, code comments, UI text, error messages, RUN.md, and any other deliverable — MUST be written in Chinese. Do not use emoji.
+- If REQUIREMENT.md has ambiguous points, apply "minimal viable assumption" and explicitly note it in the design document. Do NOT fall back to asking.

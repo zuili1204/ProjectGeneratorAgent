@@ -1,3 +1,11 @@
+# REVIEW.md Example (few-shot reference)
+
+> This file is an "excellent artifact" sample for the dev-review step, provided so the LLM can align its style and granularity.
+> When generating for real, follow the actual code and requirements — do NOT copy this example's content.
+> NOTE: The example body below is in Chinese because all generated project artifacts MUST be in Chinese.
+
+---
+
 # 评审概要
 
 - 项目类型: fullstack

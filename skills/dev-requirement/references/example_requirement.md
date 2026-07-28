@@ -1,7 +1,8 @@
-# REQUIREMENT.md 示例（few-shot 参考）
+# REQUIREMENT.md Example (few-shot reference)
 
-> 本文件是 dev-requirement 步骤的「优秀产物」样例，供 LLM 对齐风格与粒度。
-> 实际生成时以用户需求为准，不要照抄本例的业务内容。
+> This file is an "excellent artifact" sample for the dev-requirement step, provided so the LLM can align its style and granularity.
+> When generating for real, follow the user's actual request — do NOT copy this example's business content.
+> NOTE: The example body below is in Chinese because all generated project artifacts MUST be in Chinese.
 
 ---
 

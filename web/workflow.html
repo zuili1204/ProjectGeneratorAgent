@@ -1,86 +1,144 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>工作流详情 — ProjectGeneratorAgent</title>
   <link rel="icon" href="/icon.png" type="image/png">
-  <link rel="stylesheet" href="/assets/css/main.css">
+  <link rel="stylesheet" href="/assets/css/main.css?v=7">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('pga_theme');
+        if (!t && window.matchMedia) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t || 'light');
+      } catch (e) {}
+    })();
+  </script>
   <style>
-    .md-code { background: var(--bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
-    .md-inline { background: var(--bg); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Monaco, monospace; font-size: 0.9em; }
+    .md-code { background: var(--bg-subtle); padding: 12px; border-radius: 6px; overflow-x: auto; }
+    .md-inline { background: var(--bg-subtle); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Monaco, monospace; font-size: 0.9em; }
     .output-content h2, .output-content h3, .output-content h4 { margin: 14px 0 8px; }
     .output-content ul { margin: 8px 0; padding-left: 22px; }
     .output-content p { margin: 8px 0; }
     .workflow-detail-navbar { padding: 0 16px; gap: 12px; }
     .breadcrumb { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
     .breadcrumb-title {
-      font-weight: 600; font-size: 14px;
+      font-weight: 600; font-size: var(--text-sm);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       color: var(--fg);
     }
-    .terminal-toolbar { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--terminal-fg); }
-    .terminal-toolbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--terminal-green); }
     .checkpoint-banner {
       background: var(--warning-light);
-      border: 1px solid var(--warning);
+      border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
       border-radius: var(--radius);
       padding: 10px 14px;
-      margin-bottom: 12px;
+      margin-bottom: 0;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      font-size: 13px;
+      gap: var(--space-3);
+      font-size: var(--text-sm);
     }
     .checkpoint-banner .actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .panel-title { display: inline-flex; align-items: center; gap: 6px; }
+    /* 工作流详情页：子头部下方紧跟布局，去掉多余 padding */
+    #main-content.workflow-detail-layout { padding-top: var(--space-4); }
   </style>
 </head>
 <body>
+  <a href="#main-content" class="sr-only">跳到主要内容</a>
   <!-- 顶部导航 -->
-  <nav class="navbar workflow-detail-navbar">
+  <nav class="navbar workflow-detail-navbar" role="navigation" aria-label="主导航">
     <div class="breadcrumb">
-      <a href="/" class="btn btn-ghost btn-sm">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      <a href="/" class="btn btn-ghost btn-sm" aria-label="返回主页">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         返回
       </a>
-      <img src="/icon.png" alt="PGA" style="width: 24px; height: 24px; border-radius: 5px;">
-      <span class="breadcrumb-title" id="wf-title">工作流</span>
+      <img src="/icon.png" alt="PGA Logo" style="width: 24px; height: 24px; border-radius: 5px;">
+      <span class="breadcrumb-title" id="wf-title" aria-current="page">工作流</span>
       <span class="status-badge" id="wf-status">加载中</span>
     </div>
     <div class="navbar-actions">
-      <span class="text-sm text-mono text-muted" id="wf-id"></span>
-      <button class="btn btn-ghost btn-icon btn-sm" id="refresh-btn" title="刷新">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      <span class="text-sm text-mono text-muted" id="wf-id" aria-label="工作流 ID"></span>
+      <button class="btn btn-ghost btn-icon btn-sm" id="refresh-btn" type="button" aria-label="刷新工作流状态" title="刷新">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      </button>
+      <button class="btn btn-ghost btn-icon btn-sm" type="button" data-theme-toggle aria-label="切换到暗色模式" title="暗色模式">
+        <svg class="icon-moon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
       </button>
     </div>
   </nav>
 
-  <!-- 检查点提示横幅（仅当等待检查点时显示） -->
-  <div class="page-container" style="padding-top: 12px; padding-bottom: 0;" id="checkpoint-banner-container"></div>
+  <!-- 子头部：进度条 + 指标 + 操作 -->
+  <div class="wf-subheader" id="wf-subheader">
+    <div class="wf-progress">
+      <div class="wf-progress-bar" aria-hidden="true">
+        <div class="wf-progress-fill" id="wf-progress-fill" style="width:0%"></div>
+      </div>
+      <span class="wf-progress-text" id="wf-progress-text" aria-live="polite">- / -</span>
+    </div>
+    <div class="wf-metrics" id="wf-metrics"></div>
+    <div class="wf-actions">
+      <button class="btn btn-ghost btn-sm" id="wf-export-btn" type="button" aria-label="导出整个工作流">
+        <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        导出
+      </button>
+      <button class="btn btn-ghost btn-sm" id="wf-delete-btn" type="button" aria-label="删除工作流" style="color:var(--danger);">
+        <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+        删除
+      </button>
+    </div>
+  </div>
+
+  <!-- 检查点提示横幅 -->
+  <div id="checkpoint-banner-container"></div>
 
   <!-- 三栏布局 -->
-  <div class="workflow-detail-layout">
+  <div class="workflow-detail-layout" id="main-content">
     <!-- 左栏：步骤时间轴 -->
-    <div class="steps-panel">
-      <h3>执行进度</h3>
+    <div class="steps-panel" aria-label="执行进度">
+      <div class="steps-panel-header">
+        <h3 class="panel-title">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+          执行进度
+        </h3>
+        <span class="step-counter" id="step-counter">-</span>
+      </div>
       <div class="timeline" id="timeline">
         <div class="empty-state" style="padding: 20px;">
+          <span class="spinner spinner-lg" aria-hidden="true"></span>
           <div class="empty-state-text">加载中...</div>
         </div>
       </div>
     </div>
 
     <!-- 中栏：产物展示 -->
-    <div class="output-panel">
+    <div class="output-panel" aria-label="产物预览">
       <div class="output-header">
-        <span class="text-mono text-sm" id="active-file-name" style="color: var(--fg-muted);">未选择文件</span>
-        <span class="text-sm text-muted" id="active-file-size"></span>
+        <div class="output-file-info">
+          <span class="file-type-badge" data-ext="default" id="active-file-badge" aria-hidden="true">·</span>
+          <span class="output-file-name" id="active-file-name">未选择文件</span>
+          <span class="output-file-size" id="active-file-size"></span>
+        </div>
+        <div class="output-actions">
+          <button class="btn btn-ghost btn-sm" id="copy-btn" type="button" aria-label="复制文件内容" title="复制内容" disabled>
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            复制
+          </button>
+          <button class="btn btn-ghost btn-sm" id="download-btn" type="button" aria-label="下载文件" title="下载" disabled>
+            <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            下载
+          </button>
+        </div>
       </div>
       <div class="output-content" id="output-content">
         <div class="output-empty">
           <div>
-            <div style="font-size: 32px; margin-bottom: 8px;">📄</div>
+            <div style="display:flex;justify-content:center;margin-bottom:8px;color:var(--fg-subtle);">
+              <svg aria-hidden="true" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+            </div>
             <div>从右下角文件列表选择文件查看内容</div>
           </div>
         </div>
@@ -90,10 +148,10 @@
     <!-- 右栏：日志 + 文件列表 -->
     <div class="right-panel">
       <!-- 终端日志 -->
-      <div class="terminal">
+      <div class="terminal" aria-label="实时日志">
         <div class="terminal-header">
           <div class="terminal-title">
-            <div class="terminal-dots">
+            <div class="terminal-dots" aria-hidden="true">
               <div class="terminal-dot red"></div>
               <div class="terminal-dot yellow"></div>
               <div class="terminal-dot green"></div>
@@ -101,11 +159,19 @@
             <span>实时日志</span>
           </div>
           <div class="terminal-toolbar">
-            <span class="dot" id="ws-indicator" style="background: var(--fg-subtle);"></span>
-            <span id="ws-status">未连接</span>
+            <span class="log-count" id="log-count">0</span>
+            <div class="log-filters" role="group" aria-label="日志级别筛选">
+              <button class="log-filter active" data-level="all" type="button" aria-pressed="true">全部</button>
+              <button class="log-filter" data-level="warn" type="button" aria-pressed="false">警告</button>
+              <button class="log-filter" data-level="error" type="button" aria-pressed="false">错误</button>
+              <button class="log-filter" data-level="llm" type="button" aria-pressed="false">LLM</button>
+            </div>
+            <button class="term-btn active" id="autoscroll-btn" type="button" aria-label="自动滚动到底部" title="自动滚动" aria-pressed="true">
+              <svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
           </div>
         </div>
-        <div class="terminal-body" id="terminal-body">
+        <div class="terminal-body" id="terminal-body" role="log" aria-live="polite" aria-atomic="false">
           <div class="log-line level-info">
             <span class="log-message">等待连接...</span>
           </div>
@@ -113,11 +179,18 @@
       </div>
 
       <!-- 文件列表 -->
-      <div class="file-list-panel">
-        <h3>
-          <span>产出文件</span>
+      <div class="file-list-panel" aria-label="产出文件">
+        <h3 class="panel-title">
+          <span class="panel-title">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            产出文件
+          </span>
           <span class="text-sm text-muted" id="file-count">0</span>
         </h3>
+        <div class="file-search">
+          <svg class="file-search-icon" aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" id="file-search-input" placeholder="筛选文件路径..." aria-label="筛选文件">
+        </div>
         <div class="file-list" id="file-list">
           <div class="empty-state" style="padding: 20px;">
             <div class="empty-state-text">暂无文件</div>
@@ -127,7 +200,8 @@
     </div>
   </div>
 
-  <script src="/assets/js/api.js"></script>
-  <script src="/assets/js/workflow.js"></script>
+  <script src="/assets/js/api.js?v=7"></script>
+  <script src="/assets/js/theme.js?v=7"></script>
+  <script src="/assets/js/workflow.js?v=7"></script>
 </body>
 </html>

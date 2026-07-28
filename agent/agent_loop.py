@@ -5,7 +5,7 @@
 
 工作原理：
 1. 接收 SKILL prompt 作为 user 消息
-2. 调用 LLM，LLM 决定调用哪些工具（write_file / read_file / list_files / run_command）
+2. 调用 LLM，LLM 决定调用哪些工具（write_file / read_file / list_files / run_command / dispatch_subagent）
 3. 执行工具，把结果作为 tool 消息加入历史
 4. 循环直到 LLM 不再调用工具（finish_reason=stop）或达到 max_iter
 
@@ -17,7 +17,9 @@
 - 命令沙箱：run_command 经 security.validate_command 校验，命中危险模式拒绝
 - read_file 支持 offset/limit，截断时显式提示
 - tool_call arguments JSON 解析失败时回填 LLM 自纠正（不再静默空参数执行）
-- max_iter 软截断：有产出且健康检查可过则允许完成
+- max_iter 软截断：有产出但需通过验证门禁（不再自动放行）
+- verification-before-completion：system prompt 强制要求跑验证命令贴输出
+- dispatch_subagent：派发独立子代理执行隔离任务（P1，子代理不继承会话历史）
 - 指标统计：llm_calls / tool_calls / retries / duration
 """
 from __future__ import annotations
@@ -45,7 +47,11 @@ log = logging.getLogger(__name__)
 
 WRITE_FILE_TOOL = make_tool(
     name="write_file",
-    description="把内容写入工作区文件。如果文件已存在则覆盖。自动创建父目录。",
+    description=(
+        "把内容写入工作区文件。如果文件已存在则覆盖。自动创建父目录。"
+        "大文件可分片写入：首次 write_file 写前半部分，后续用 append=true 追加。"
+        "单次写入建议不超过 8000 字符以避免 JSON 参数被截断。"
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -55,7 +61,11 @@ WRITE_FILE_TOOL = make_tool(
             },
             "content": {
                 "type": "string",
-                "description": "文件完整内容（UTF-8 文本）",
+                "description": "文件内容（UTF-8 文本）。大文件请分片：首次写前半部分，后续用 append=true 追加剩余部分。",
+            },
+            "append": {
+                "type": "boolean",
+                "description": "可选，为 true 时内容追加到文件末尾而非覆盖（用于分片写入大文件）。默认 false（覆盖）。",
             },
         },
         "required": ["path", "content"],
@@ -126,7 +136,45 @@ RUN_COMMAND_TOOL = make_tool(
     },
 )
 
-ALL_TOOLS = [WRITE_FILE_TOOL, READ_FILE_TOOL, LIST_FILES_TOOL, RUN_COMMAND_TOOL]
+DISPATCH_SUBAGENT_TOOL = make_tool(
+    name="dispatch_subagent",
+    description=(
+        "派发独立子代理执行隔离任务。子代理不继承当前会话历史，"
+        "只接收 task_brief 作为需求单一来源。适用于：独立代码评审、"
+        "独立模块实现、独立测试编写等需要隔离上下文的任务。"
+        "子代理完成后返回状态 + 报告摘要。"
+        "Use when: 需要独立视角（评审）、需要隔离上下文（避免污染）、"
+        "需要并行执行多个独立子任务。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "task_brief": {
+                "type": "string",
+                "description": (
+                    "任务简报：作为子代理需求的单一来源。"
+                    "包含目标、可读上下文文件、产物路径、验收条件。"
+                    "子代理只会看到这份简报 + 指定的 context_files，看不到当前会话历史。"
+                ),
+            },
+            "context_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "子代理可读取的上下文文件相对路径列表（如 ['REQUIREMENT.md', 'DESIGN.md', 'code/backend/main.py']）",
+            },
+            "skill_hint": {
+                "type": "string",
+                "description": "可选，建议子代理使用的 skill（如 'dev-review'），子代理可自主决定是否采用",
+            },
+        },
+        "required": ["task_brief"],
+    },
+)
+
+ALL_TOOLS = [WRITE_FILE_TOOL, READ_FILE_TOOL, LIST_FILES_TOOL, RUN_COMMAND_TOOL, DISPATCH_SUBAGENT_TOOL]
+
+# 非递归工具集：子代理用，不含 dispatch_subagent（避免无限嵌套）
+ALL_TOOLS_NON_RECURSIVE = [WRITE_FILE_TOOL, READ_FILE_TOOL, LIST_FILES_TOOL, RUN_COMMAND_TOOL]
 
 
 # === 结构化工具错误 ===
@@ -151,11 +199,17 @@ def _format_error(code: str, detail: str) -> str:
 async def _exec_write_file(workspace: Workspace, args: dict) -> str:
     path = args.get("path", "")
     content = args.get("content", "")
+    append = args.get("append", False)
     if not path:
         return _format_error(ToolError.PATH_INVALID, "path is required")
     if not isinstance(content, str):
         return _format_error(ToolError.PATH_INVALID, "content must be string")
     try:
+        if append and workspace.file_exists(path):
+            existing = workspace.read_file(path)
+            workspace.write_file(path, existing + content)
+            total = len(existing) + len(content)
+            return f"OK: appended {len(content)} bytes to {path} (total {total} bytes)"
         workspace.write_file(path, content)
         return f"OK: wrote {len(content)} bytes to {path}"
     except ValueError as e:
@@ -266,6 +320,85 @@ async def _exec_run_command(workspace: Workspace, args: dict) -> str:
         return _format_error(ToolError.UNKNOWN, str(e))
 
 
+# === dispatch_subagent 执行器（P1） ===
+#
+# 借鉴 superpowers SDD：子代理不继承会话历史，task_brief 是需求单一来源。
+# controller 永不直接改子代理产出的代码（会跳过审查）。
+# 子代理用 ALL_TOOLS_NON_RECURSIVE（无 dispatch_subagent，避免无限嵌套）。
+
+# 持有 LLMClient 与 LLMConfig 引用（由 run_agent_loop 注入）
+# 避免循环 import：在函数内 import subagent 模块
+
+
+async def _exec_dispatch_subagent(workspace: Workspace, args: dict, llm: Any = None, llm_config: Any = None) -> str:
+    """派发独立子代理执行隔离任务。"""
+    task_brief = args.get("task_brief", "")
+    context_files = args.get("context_files", []) or []
+    skill_hint = args.get("skill_hint", "")
+
+    if not task_brief.strip():
+        return _format_error(ToolError.PATH_INVALID, "task_brief is required")
+
+    if llm is None:
+        return _format_error(
+            ToolError.UNKNOWN,
+            "dispatch_subagent 不可用：未注入 LLMClient（请通过 run_agent_loop 的 llm 参数传递）"
+        )
+
+    # 延迟 import 避免循环
+    from .subagent import dispatch_subagent
+
+    try:
+        result = await dispatch_subagent(
+            llm=llm,
+            workspace=workspace,
+            task_brief=task_brief,
+            context_files=context_files,
+            skill_hint=skill_hint,
+            max_iter=20,
+            inactivity_timeout=120,
+            context_window=32000,
+        )
+    except Exception as e:
+        return _format_error(ToolError.UNKNOWN, f"子代理执行异常: {e}")
+
+    # 格式化报告返回给 controller
+    lines = [
+        f"子代理状态: {result.status}",
+        f"迭代: {result.iterations}, Tokens: {result.total_tokens}, 耗时: {result.duration_sec:.1f}s",
+    ]
+    if result.files_written:
+        lines.append(f"产出文件: {result.files_written}")
+    if result.commands_run:
+        lines.append(f"执行命令: {len(result.commands_run)} 条")
+    if result.error:
+        lines.append(f"错误: {result.error}")
+    if result.report:
+        lines.append("--- 报告 ---")
+        # 截断过长报告
+        report = result.report
+        if len(report) > 4000:
+            report = report[:4000] + f"\n... (truncated, {len(report) - 4000} chars omitted)"
+        lines.append(report)
+    return "\n".join(lines)
+
+
+# 带 llm 注入的工具执行器分派
+async def _execute_tool_call(
+    name: str, args: dict, workspace: Workspace, llm: Any = None, llm_config: Any = None,
+) -> str:
+    """统一工具执行分派（支持 dispatch_subagent 的 llm 注入）。"""
+    if name == "dispatch_subagent":
+        return await _exec_dispatch_subagent(workspace, args, llm=llm, llm_config=llm_config)
+    executor = _TOOL_EXECUTORS.get(name)
+    if not executor:
+        return _format_error(ToolError.UNKNOWN, f"unknown tool '{name}'")
+    try:
+        return await executor(workspace, args)
+    except Exception as e:
+        return _format_error(ToolError.UNKNOWN, str(e))
+
+
 _TOOL_EXECUTORS: dict[str, Callable[[Workspace, dict], Awaitable[str]]] = {
     "write_file": _exec_write_file,
     "read_file": _exec_read_file,
@@ -316,12 +449,26 @@ def _compress_messages(messages: list[dict], keep_recent: int = 10) -> list[dict
     中间的 tool/assistant 消息压缩为摘要。
 
     用于上下文超限时回收 token 预算。
+
+    注意：切分点必须不破坏 tool_calls ↔ tool 的配对关系。
+    如果 tail 以 tool 消息开头，该 tool 消息的 assistant(tool_calls)
+    会被压缩到 middle → API 返回 400:
+    "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"
+    修复：向前扩展 tail 直到越过 tool 消息组，将对应的 assistant(tool_calls) 一并保留。
     """
     if len(messages) <= keep_recent + 2:
         return messages
     head = messages[:2]  # system + first user
-    tail = messages[-keep_recent:]
-    middle = messages[2:-keep_recent]
+
+    # 找到安全的切分点：tail 不能以 tool 消息开头
+    cut = len(messages) - keep_recent
+    if cut < 2:
+        cut = 2
+    while cut > 2 and messages[cut].get("role") == "tool":
+        cut -= 1
+
+    tail = messages[cut:]
+    middle = messages[2:cut]
     summary_lines: list[str] = []
     for m in middle:
         role = m.get("role", "")
@@ -353,6 +500,8 @@ async def run_agent_loop(
     on_tool_result: Callable[[str, str], Awaitable[None]] | None = None,
     inactivity_timeout: int = DEFAULT_INACTIVITY_TIMEOUT,
     context_window: int = DEFAULT_MODEL_CONTEXT_WINDOW,
+    tools_override: list | None = None,
+    llm_config: Any = None,
 ) -> AgentRunResult:
     """执行 LLM agent 循环。
 
@@ -366,10 +515,13 @@ async def run_agent_loop(
         on_tool_result: 工具结果回调（name, result）
         inactivity_timeout: 无输出超时秒数（LLM 卡住不返回则取消）
         context_window: 模型上下文窗口 token 数，用于预算守卫
+        tools_override: 可选，覆盖默认工具集（子代理用非递归集）
+        llm_config: 可选，LLMConfig（用于 dispatch_subagent 执行器构造子代理）
 
     Returns:
         AgentRunResult
     """
+    active_tools = tools_override if tools_override is not None else ALL_TOOLS
     result = AgentRunResult()
     start_time = time.time()
 
@@ -378,7 +530,7 @@ async def run_agent_loop(
         {
             "role": "system",
             "content": (
-                "你是一个项目生成智能体。你通过调用工具（write_file/read_file/list_files/run_command）"
+                "你是一个项目生成智能体。你通过调用工具（write_file/read_file/list_files/run_command/dispatch_subagent）"
                 "完成任务。每次只调用必要的工具，完成后用一段简短文字总结你做了什么。\n\n"
                 "## 重要规则\n"
                 "1. **必须实际调用 write_file 工具来创建文件**，不要只说「我会写出 xxx」就结束\n"
@@ -389,7 +541,15 @@ async def run_agent_loop(
                 "5. 如果任务说「必须产出 xxx 文件」，你在结束前一定要调用 write_file 写出它\n"
                 "6. 工具返回 ERROR[CODE] 时按 CODE 换策略：PATH_INVALID 用 list_files 确认路径；"
                 "NOT_FOUND 检查文件名；TIMEOUT 缩小命令范围；COMMAND_BLOCKED 改用允许的命令\n"
-                "7. read_file 截断时会提示剩余字符数，用 offset 参数继续读取，不要重复从头读"
+                "7. read_file 截断时会提示剩余字符数，用 offset 参数继续读取，不要重复从头读\n"
+                "8. **验证后完成（verification-before-completion）**：声明「完成」前必须用 run_command "
+                "跑实际验证命令（测试、语法检查、启动命令）并把输出贴出来。不允许「应该没问题」、"
+                "「大概可以」、「之前跑过」等假设性表述。没有 fresh 验证证据的完成声明视为未完成。\n"
+                "9. **测试执行**：如果产物包含 code/tests/ 目录，结束前必须执行 pytest 或 npm test "
+                "并贴出通过证据（exit_code: 0）。测试不通过必须修复至通过才能结束。\n"
+                "10. **dispatch_subagent 隔离**：需要独立视角（如代码评审）时用 dispatch_subagent 派发"
+                "子代理，子代理只看 task_brief + context_files，不继承当前会话。controller 永不在自己会话里"
+                "改子代理产出的代码（会跳过审查）。"
             ),
         },
         {"role": "user", "content": prompt},
@@ -420,7 +580,7 @@ async def run_agent_loop(
                 await on_output(text)
 
         call_task = asyncio.create_task(
-            llm.chat_stream(messages=messages, tools=ALL_TOOLS, on_delta=on_output_watch)
+            llm.chat_stream(messages=messages, tools=active_tools, on_delta=on_output_watch)
         )
 
         resp: LLMResponse | None = None
@@ -493,9 +653,16 @@ async def run_agent_loop(
 
             # 处理 arguments JSON 解析失败：回填 LLM 自纠正
             if tc.is_broken:
+                parse_hint = ""
+                if tc.name == "write_file":
+                    parse_hint = (
+                        " 提示：文件内容可能过长导致 JSON 参数被截断。"
+                        "请将文件拆分为多次 write_file 调用——首次写入前半部分（不超过 8000 字符），"
+                        "后续用 append=true 追加剩余部分。"
+                    )
                 tool_result = (
                     f"ERROR[PARSE]: 工具 {tc.name} 的 arguments 解析失败，无法执行。"
-                    f"请重新调用该工具并提供合法的 JSON 参数。\n{tc.args_parse_error}"
+                    f"请重新调用该工具并提供合法的 JSON 参数。{parse_hint}\n{tc.args_parse_error}"
                 )
                 if on_tool_result:
                     await on_tool_result(tc.name, tool_result)
@@ -533,7 +700,16 @@ async def run_agent_loop(
                     return result
 
             executor = _TOOL_EXECUTORS.get(tc.name)
-            if not executor:
+            if tc.name == "dispatch_subagent":
+                # 子代理派发：需要 llm 注入
+                try:
+                    tool_result = await _execute_tool_call(
+                        tc.name, tc.arguments, workspace, llm=llm, llm_config=llm_config,
+                    )
+                except Exception as e:
+                    tool_result = _format_error(ToolError.UNKNOWN, str(e))
+                    log.exception("tool %s execution failed", tc.name)
+            elif not executor:
                 tool_result = _format_error(ToolError.UNKNOWN, f"unknown tool '{tc.name}'")
             else:
                 try:
@@ -568,12 +744,18 @@ async def run_agent_loop(
 
     # 达到最大迭代次数
     result.truncated = True
-    # 软截断：有产出文件，允许上层按健康检查决定是否完成
+    # 软截断：有产出文件但不自动放行，标记 needs_verification 让上层健康检查决定
+    # （不再自动 soft_truncated=True 放行；上层必须跑验证门禁通过才允许 completed）
     if result.files_written:
-        result.soft_truncated = True
-        result.error = f"达到最大迭代次数 {max_iter}（有 {len(result.files_written)} 个文件产出，软截断）"
+        result.soft_truncated = True  # 保留字段用于上层判断"有产出"
+        result.error = (
+            f"达到最大迭代次数 {max_iter}（有 {len(result.files_written)} 个文件产出）。"
+            f"需通过 verification gate 才能标记完成：测试目录存在 + 测试通过 + 运行时验证。"
+        )
     else:
-        result.error = f"达到最大迭代次数 {max_iter}"
+        result.error = f"达到最大迭代次数 {max_iter}（无文件产出，硬失败）"
+        result.soft_truncated = False
     result.duration_sec = time.time() - start_time
-    log.warning("agent loop truncated at max_iter=%d, soft=%s", max_iter, result.soft_truncated)
+    log.warning("agent loop truncated at max_iter=%d, soft=%s, files=%d",
+                max_iter, result.soft_truncated, len(result.files_written))
     return result

@@ -267,6 +267,9 @@ class WorkflowConfig:
     # 全局 / 步骤级超时
     global_timeout: int = DEFAULT_GLOBAL_TIMEOUT
     step_timeout: int = DEFAULT_STEP_TIMEOUT
+    # Git 集成（P3-1）：create_workflow 时 git init，每步 commit，rerun 新建分支。
+    # git 不可用时优雅降级，不影响主流程。可通过参数关闭。
+    enable_git: bool = True
 
     def __post_init__(self) -> None:
         if self.project_type not in VALID_PROJECT_TYPES:
@@ -289,4 +292,5 @@ class WorkflowConfig:
             health_retry=int(d.get("health_retry", DEFAULT_HEALTH_RETRY)),
             global_timeout=int(d.get("global_timeout", DEFAULT_GLOBAL_TIMEOUT)),
             step_timeout=int(d.get("step_timeout", DEFAULT_STEP_TIMEOUT)),
+            enable_git=bool(d.get("enable_git", True)),
         )

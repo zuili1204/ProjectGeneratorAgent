@@ -59,7 +59,7 @@
   async function saveConfig() {
     const btn = $('save-btn');
     btn.disabled = true;
-    btn.innerHTML = '<span class="text-sm">保存中...</span>';
+    btn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>保存中...</span>';
 
     try {
       // 逐项保存（仅保存有值或与默认不同的项）
@@ -99,6 +99,52 @@
     }
   }
 
+  // === 服务令牌 ===
+  function maskToken(t) {
+    if (!t) return '';
+    return t.length > 12 ? t.slice(0, 6) + '••••' + t.slice(-4) : '已配置';
+  }
+
+  function loadServerToken() {
+    const t = API.getToken();
+    const el = $('cfg-server_token');
+    const status = $('token-status');
+    if (t) {
+      el.value = '';
+      el.placeholder = maskToken(t) + '（已配置，重新输入覆盖）';
+      status.textContent = '✓ 已配置';
+      status.style.color = 'var(--success)';
+    } else {
+      el.placeholder = '粘贴服务令牌（如 B0Br...）';
+      status.textContent = '未配置，API 调用将被拒绝';
+      status.style.color = 'var(--danger)';
+    }
+  }
+
+  function saveServerToken() {
+    const el = $('cfg-server_token');
+    const val = el.value.trim();
+    if (!val) {
+      toast('请输入服务令牌', 'error');
+      return;
+    }
+    API.setToken(val);
+    toast('服务令牌已保存', 'success');
+    loadServerToken();
+    // 移除 URL 中的 auth=1 标记
+    if (location.search.includes('auth=1')) {
+      history.replaceState(null, '', '/settings.html');
+    }
+    // 令牌就绪后加载配置
+    setTimeout(loadConfig, 200);
+  }
+
+  function clearServerToken() {
+    API.setToken('');
+    toast('服务令牌已清除', 'success');
+    loadServerToken();
+  }
+
   // === 预设后端 ===
   function applyPreset(base, model) {
     $('cfg-llm_base_url').value = base;
@@ -107,9 +153,32 @@
     $('cfg-llm_api_key').focus();
   }
 
+  // === 密码/令牌字段显隐切换（password-toggle） ===
+  function initPasswordToggles() {
+    document.querySelectorAll('.pw-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.getAttribute('data-toggle-target');
+        const input = document.getElementById(targetId);
+        if (!input) return;
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        const eye = btn.querySelector('.icon-eye');
+        const eyeOff = btn.querySelector('.icon-eye-off');
+        if (eye && eyeOff) {
+          eye.style.display = show ? 'none' : 'block';
+          eyeOff.style.display = show ? 'block' : 'none';
+        }
+        btn.setAttribute('aria-label', show ? '隐藏内容' : '显示内容');
+        btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+      });
+    });
+  }
+
   // === 初始化 ===
   document.addEventListener('DOMContentLoaded', () => {
     $('save-btn').addEventListener('click', saveConfig);
+    $('save-token-btn').addEventListener('click', saveServerToken);
+    $('clear-token-btn').addEventListener('click', clearServerToken);
 
     document.querySelectorAll('.preset-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -119,6 +188,20 @@
       });
     });
 
-    loadConfig();
+    initPasswordToggles();
+
+    // 先加载令牌状态，再按需加载配置（无令牌时不触发 401）
+    loadServerToken();
+    const authRedirect = location.search.includes('auth=1');
+    if (API.hasToken()) {
+      loadConfig();
+    } else if (authRedirect) {
+      // 从 401 跳转过来，高亮令牌区
+      $('auth-section').scrollIntoView({ behavior: 'smooth' });
+      toast('请先填写服务令牌', 'error');
+    } else {
+      // 首次访问无令牌，温和提示
+      toast('请先在顶部填写服务令牌', '');
+    }
   });
 })();

@@ -4,14 +4,38 @@
 const API = (() => {
   // 自动推断后端地址：与页面同源
   const BASE = '';
+  const TOKEN_KEY = 'pga_server_token';
+
+  // === 服务令牌（localStorage，仅浏览器本地，不发给后端当配置） ===
+  function getToken() {
+    try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+  }
+  function setToken(token) {
+    try {
+      if (token) localStorage.setItem(TOKEN_KEY, token);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* localStorage 不可用时静默 */ }
+  }
+  function hasToken() { return !!getToken(); }
 
   async function request(method, path, body) {
     const opts = {
       method,
       headers: { 'Content-Type': 'application/json' },
     };
+    const token = getToken();
+    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
     if (body !== undefined) opts.body = JSON.stringify(body);
     const resp = await fetch(BASE + path, opts);
+    // 401：令牌缺失或无效 → 引导到设置页填写
+    if (resp.status === 401) {
+      const onSettings = location.pathname.endsWith('/settings.html');
+      if (!onSettings) {
+        toast('服务令牌缺失或无效，正在跳转设置页', 'error');
+        location.href = '/settings.html?auth=1';
+      }
+      throw new Error('未授权：缺少或错误的 Authorization 头');
+    }
     let data;
     try { data = await resp.json(); } catch (e) { data = null; }
     if (!resp.ok) {
@@ -22,6 +46,11 @@ const API = (() => {
   }
 
   return {
+    // 服务令牌
+    getToken,
+    setToken,
+    hasToken,
+
     // 健康检查
     health: () => request('GET', '/api/health'),
 
@@ -35,7 +64,13 @@ const API = (() => {
     listFiles: (id) => request('GET', `/api/workflows/${id}/files`),
     readFile: (id, path) => request('GET', `/api/workflows/${id}/files/${path}`),
     submitCheckpoint: (id, payload) => request('POST', `/api/workflows/${id}/checkpoint`, payload),
-    rerunStep: (id, skill) => request('POST', `/api/workflows/${id}/rerun/${skill}`),
+    rerunStep: (id, skill, params = {}) => {
+      const qs = new URLSearchParams();
+      if (params.clean) qs.set('clean', 'true');
+      if (params.latest) qs.set('latest', 'true');
+      const q = qs.toString();
+      return request('POST', `/api/workflows/${id}/rerun/${skill}${q ? '?' + q : ''}`);
+    },
 
     // === 模板 / Skills ===
     getTemplates: () => request('GET', '/api/templates'),
@@ -110,17 +145,40 @@ function stepStatusText(status) {
   return map[status] || status;
 }
 
-// Toast 提示
+// Toast 提示（aria-live polite，不抢焦点；3-5s 自动消失）
+// 复用单一 aria-live 容器，便于屏幕阅读器播报。
+function _toastRegion() {
+  let r = document.getElementById('toast-region');
+  if (!r) {
+    r = document.createElement('div');
+    r.id = 'toast-region';
+    r.setAttribute('aria-live', 'polite');
+    r.setAttribute('aria-atomic', 'true');
+    r.className = 'sr-only';
+    document.body.appendChild(r);
+  }
+  return r;
+}
+
 function toast(message, type = '') {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
-  el.textContent = message;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  // 图标 + 文本，避免仅靠颜色传达状态（color-not-decorative-only）
+  const icon = type === 'success' ? '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>'
+    : type === 'error' ? '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>'
+    : type === 'warning' ? '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>'
+    : '';
+  el.innerHTML = `${icon}<span>${escapeHtml(message)}</span>`;
   document.body.appendChild(el);
+  // 供屏幕阅读器播报的纯文本
+  _toastRegion().textContent = message;
+
+  const DURATION = type === 'error' ? 4000 : 2800;
   setTimeout(() => {
-    el.style.opacity = '0';
-    el.style.transition = 'opacity 0.3s';
-    setTimeout(() => el.remove(), 300);
-  }, 2500);
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 280);
+  }, DURATION);
 }
 
 // 简易 markdown 渲染（仅基础语法）

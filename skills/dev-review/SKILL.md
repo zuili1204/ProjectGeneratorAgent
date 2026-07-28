@@ -1,165 +1,207 @@
 ---
 name: dev-review
-version: 1.0.0
+version: 1.4.0
+description: Use when code/ has been generated and an independent review against REQUIREMENT.md and DESIGN.md is needed before self-check — produces REVIEW.md via diff-based review (git diff base..head) dispatched to an isolated subagent to avoid self-review blind spots; for frontend projects also reviews UI design-system compliance (token consistency, typography pairing, icon family, visual hierarchy, anti-patterns)
 inputs: [$ARGUMENTS]
 outputs: [REVIEW.md]
 depends_on: [REQUIREMENT.md, DESIGN.md, code/RUN.md]
-est_tokens: 3000
-est_iters: 6
+optional_inputs: [DESIGN_SYSTEM.md]
+est_tokens: 4000
+est_iters: 12
 ---
 
-# 代码评审 (dev-review)
+# Code Review (dev-review)
 
-## 任务目标
+## Overview
 
-作为「一句话生成项目」工作流的可选步骤（默认插在 `dev-code` 与 `dev-selfcheck` 之间），以**评审者视角**对照 `REQUIREMENT.md` 与 `DESIGN.md` 审视 `code/` 目录下已生成的代码，产出 `REVIEW.md`。本步骤只做评审，不修复代码、不重写项目，发现的问题交由下游 `dev-selfcheck` 针对性修复。引入此步骤是为了打破「自己写自己检」的认知盲区。
+**Core principle:** Review, don't fix. Act as an independent reviewer comparing generated code against requirements and design. Every finding must be locatable (file + line). Diff-based review preferred over full scan.
 
-## 角色定位
+## Objective
 
-- 你是**评审者（reviewer）**，不是作者。不要重写代码，不要补全缺失文件，只评审。
-- 评审者与作者使用相同 LLM，但**视角不同**：作者追求「能跑起来」，评审者追求「与需求/设计一致且无明显缺陷」。
-- 评审意见要具体到文件路径与行号（或代码片段），不要泛泛而谈。
+As an optional step of the "one-sentence-to-project" workflow (typically inserted between `dev-code` and `dev-selfcheck`), review the code under `code/` from an **independent reviewer perspective** against `REQUIREMENT.md` and `DESIGN.md`, and produce `REVIEW.md`. This step only reviews — it does not fix code or rewrite the project. Findings are handed to downstream `dev-selfcheck` for targeted fixes.
 
-## 输入
+> **v1.1 change**: upgraded to an isolated subagent dispatch model. Adapted from superpowers SDD two-stage review (Stage1 spec compliance + Stage2 code quality). The controller (the dev-review main loop) should dispatch an independent subagent via the `dispatch_subagent` tool to perform the review. The subagent only reads `code/` + `REQUIREMENT.md` + `DESIGN.md` and does NOT inherit dev-code's session history — avoiding the "reviewing your own work" cognitive blind spot.
 
-- `$ARGUMENTS`：用户原始需求（仅作参考）
-- 工作区已有文件（必读 `REQUIREMENT.md`、`DESIGN.md`，扫描整个 `code/` 目录）
+> **v1.2 change**: upgraded to diff-based review. Prefer reviewing `git diff <base>..<head>` (the change from the baseline commit at this step's start to the current HEAD) over a full scan of `code/`. Supports incremental re-review: after a rerun, only review the fix_base..head incremental change. Falls back to a full scan when git is unavailable (mark "non-diff review" in REVIEW.md). Adapted from superpowers git integration and branch lifecycle.
 
-## 前置校验
+> **v1.4 change**: added a UI design-system compliance dimension. For frontend projects (fullstack / frontend_only / pure HTML+JS), the reviewer now also checks whether the code consumes `DESIGN_SYSTEM.md` tokens consistently — color tokens (no hardcoded hex drift), typography pairing (heading/body not mixed), spacing rhythm (4/8dp tokens), icon family unity (one set, consistent stroke-width), visual hierarchy (size/spacing/contrast, not color alone), and anti-pattern hits from `DESIGN_SYSTEM.md` §6. This dimension catches design drift at review time before dev-selfcheck enforces it as a gate.
 
-进入正式评审前必须完成以下校验，任一不通过则终止并给出原因，不产出空报告：
+## Role
 
-1. **REQUIREMENT.md 存在性检查**：用 `read_file` 读取 `REQUIREMENT.md`。若文件不存在或为空，立即终止，提示「REQUIREMENT.md 缺失，请先执行 dev-requirement 步骤」，不调用 `write_file`。
-2. **DESIGN.md 存在性检查**：用 `read_file` 读取 `DESIGN.md`。若文件不存在或为空，立即终止，提示「DESIGN.md 缺失，请先执行 dev-design 步骤」。
-3. **code/ 目录存在性检查**：用 `list_files` 扫描工作区根目录，确认 `code/` 目录存在且包含代码文件。若不存在或为空，终止并提示「code/ 目录缺失或无代码，请先执行 dev-code 步骤」。
-4. **项目类型解析**：从 `REQUIREMENT.md` 中解析 `project_type`，作为评审清单选择的依据。若缺失，按 `code/` 目录结构推断并在报告中显式标注假设。
+- You are an **independent reviewer**, not the author. Do not rewrite code, do not fill missing files — only review.
+- **Prefer dispatching a subagent via `dispatch_subagent` to perform the review**: the subagent sees only task_brief + context_files (`REQUIREMENT.md`, `DESIGN.md`, files under `code/`), not dev-code's session history, ensuring an independent perspective.
+- If `dispatch_subagent` is unavailable (no LLM injected), degrade to a same-LLM different-prompt weakened review (mark "non-isolated-subagent review" in REVIEW.md).
+- Reviewer and author use the same LLM but **different perspectives**: the author pursues "it runs", the reviewer pursues "consistent with requirements/design and free of obvious defects".
+- Findings must be specific to file path and line number (or code snippet) — no vague generalities.
 
-## 评审维度
+## Inputs
 
-评审从三个维度展开，每个维度独立打分（通过 / 警告 / 不通过），最终汇总为整体结论：
+- `$ARGUMENTS`: the user's original request (reference only)
+- Existing workspace files (MUST read `REQUIREMENT.md`, `DESIGN.md`; scan the entire `code/` directory)
 
-### 维度一：需求覆盖度
+## Pre-checks
 
-对照 `REQUIREMENT.md` 的 **P0 / P1 功能需求**，逐条核对 `code/` 中是否有对应实现：
+Before formal review, complete the following checks. If any fails, terminate with a reason and do not produce an empty report:
 
-- P0 每条必须可定位到具体代码（文件 + 函数/路由/命令）。漏一条 P0 即为「不通过」。
-- P1 每条尽量定位，漏条记为「警告」并在报告列出。
-- P2 不强制覆盖，但若已实现需点出。
-- 识别「需求里没有但代码里多了」的功能（过度实现），记为「警告」。
+1. **REQUIREMENT.md existence**: use `read_file` to read `REQUIREMENT.md`. If missing or empty, terminate immediately with "REQUIREMENT.md missing, run dev-requirement first" and do NOT call `write_file`.
+2. **DESIGN.md existence**: use `read_file` to read `DESIGN.md`. If missing or empty, terminate with "DESIGN.md missing, run dev-design first".
+3. **code/ directory existence**: use `list_files` to scan the workspace root and confirm `code/` exists and contains code files. If missing or empty, terminate with "code/ missing or has no code, run dev-code first".
+4. **project_type parsing**: parse `project_type` from `REQUIREMENT.md` as the basis for selecting the review checklist. If missing, infer from the `code/` directory structure and explicitly note the assumption in the report.
+5. **Diff baseline detection (v1.2)**: use `run_command` to run `git rev-parse HEAD` and `git log --oneline -5` to confirm the workspace has git history. If it does, record the current HEAD as the diff head; the baseline is the commit at the start of the dev-code step (read from `_ledger.md`'s `base_commit` field, or take the commit before dev-code from `HEAD~N`). If no git (`git rev-parse` fails), mark "full-scan mode" and explicitly note "non-diff review: git unavailable" in REVIEW.md. Rerun case (incremental re-review): base is the fix commit from the previous review round.
 
-### 维度二：设计一致性
+## Review Dimensions
 
-对照 `DESIGN.md` 的**目录结构、模块划分、接口/路由/命令设计、数据模型**，核对代码是否与设计一致：
+Review proceeds along four dimensions (the fourth applies to frontend projects only). Each is scored independently (pass / warning / fail), then aggregated into an overall conclusion:
 
-- 目录结构是否与 DESIGN.md 的 tree 图一致（允许细微出入，但入口文件名、配置文件位置必须对齐）。
-- API 路径 / 方法 / 参数是否与 DESIGN.md 的接口表一致。
-- 数据模型字段是否与 DESIGN.md 的 ER 图 / 表结构一致（字段名、类型、约束）。
-- 命令参数 / 子命令结构（cli）或输入输出格式（script）是否与 DESIGN.md 一致。
-- 偏离设计的地方需在报告逐一列出，并标注「是有意改进」还是「疑似偏离」。
+### Dimension 1: Requirement Coverage
 
-### 维度三：潜在缺陷
+Against the **P0 / P1 functional requirements** in `REQUIREMENT.md`, check one by one whether `code/` has a corresponding implementation:
 
-以评审者经验审视代码，发现以下类别的问题（不要求穷举，但发现即记录）：
+- Every P0 item MUST be locatable to specific code (file + function/route/command). Missing one P0 item = "fail".
+- Every P1 item should be locatable; missing items are recorded as "warning" and listed in the report.
+- P2 coverage is not mandatory, but if implemented, note it.
+- Identify "in the code but not in the requirements" features (over-implementation) and record as "warning".
 
-- **安全缺陷**：硬编码密钥、SQL 注入、未转义的用户输入、危险命令执行（`os.system(untrusted)`）、CORS 配置过宽。
-- **资源路径问题**：纯前端项目用了 `fetch` 加载本地 JSON、绝对路径资源引用（`/assets/`）。
-- **依赖问题**：`import` 的包未在 `requirements.txt` / `package.json` 声明；声明了但未使用的依赖；版本冲突或使用了 alpha/beta 版本。
-- **入口问题**：入口文件命名不规范（应 `main.py` 而写成 `app.py`）；`RUN.md` 启动命令引用的入口文件不存在；启动命令不可执行（仅写「直接打开 index.html」）。
-- **运行时风险**：未捕获的异常、空值未处理、循环引用、死锁风险、无限循环风险。
-- **可维护性**：函数过长（> 80 行）、重复代码、魔法数字、无注释的复杂逻辑。
+### Dimension 2: Design Consistency
 
-## 执行步骤
+Against `DESIGN.md`'s **directory structure, module breakdown, interface/route/command design, data model**, check whether the code is consistent with the design:
 
-按顺序执行以下 8 步：
+- Is the directory structure consistent with DESIGN.md's tree (minor differences allowed, but entry filename and config file location MUST align)?
+- Are API paths / methods / params consistent with DESIGN.md's interface table?
+- Are data model fields consistent with DESIGN.md's ER diagram / table structure (field name, type, constraint)?
+- Are command params / subcommand structure (cli) or IO format (script) consistent with DESIGN.md?
+- Deviations from the design MUST be listed one by one, marked as "intentional improvement" or "suspected deviation".
 
-1. **第一步：立即用 `write_file` 写出 `REVIEW.md` 初版**（框架）。写入根目录，包含三维度清单模板，每项标记为「待评审」。此步不可跳过、不可后置。
-2. **读取需求与设计**：用 `read_file` 读取 `REQUIREMENT.md` 与 `DESIGN.md`，提取 P0/P1 功能清单、目录结构、接口表、数据模型。
-3. **扫描代码**：用 `list_files` 递归扫描 `code/` 目录，建立代码文件清单；用 `read_file` 读取入口文件、配置文件、核心模块（不必逐行读，抓重点）。
-4. **需求覆盖度评审**：逐条核对 P0/P1，记录覆盖情况（已实现 / 部分实现 / 未实现 / 过度实现）。
-5. **设计一致性评审**：对照 DESIGN.md 的结构化设计，记录偏离项。
-6. **潜在缺陷评审**：按缺陷类别扫描代码，记录发现的问题（文件 + 行号/片段 + 类别 + 严重度）。
-7. **汇总评分**：三维度分别给出「通过 / 警告 / 不通过」与一句话理由；给出整体结论（建议进入 dev-selfcheck / 建议先返工 dev-code）。
-8. **更新 REVIEW.md**：用 `write_file` 覆盖写入完整的 `REVIEW.md`，完成后置自检。
+### Dimension 3: Potential Defects
 
-## 后置自检
+From the reviewer's experience, scan the code for the following categories (not required to be exhaustive, but record what you find):
 
-在最后一次 `write_file` 写入 `REVIEW.md` 前后各做一次自检，缺失项必须补全后再交付：
+- **Security defects**: hardcoded keys, SQL injection, unescaped user input, dangerous command execution (`os.system(untrusted)`), overly permissive CORS.
+- **Resource path issues**: pure frontend projects using `fetch` to load local JSON, absolute resource paths (`/assets/`).
+- **Dependency issues**: `import`ed packages not declared in `requirements.txt` / `package.json`; declared but unused deps; version conflicts or alpha/beta versions.
+- **Entry issues**: non-standard entry filename (should be `main.py` but written as `app.py`); the entry file referenced by `RUN.md` startup command doesn't exist; startup command not executable (only "just open index.html").
+- **Runtime risks**: uncaught exceptions, unhandled nulls, circular references, deadlock risks, infinite-loop risks.
+- **Maintainability**: overlong functions (> 80 lines), duplicated code, magic numbers, complex logic without comments.
 
-- 写入前自检（内容完整性）：
-  - [ ] REVIEW.md 包含三维度章节（需求覆盖度 / 设计一致性 / 潜在缺陷）
-  - [ ] 每条 P0 功能有明确评审结论（已实现 / 部分实现 / 未实现 + 定位）
-  - [ ] 设计偏离项逐条列出（文件 + 偏离点 + 是否有意）
-  - [ ] 潜在缺陷按类别归类，每条含文件路径与严重度
-  - [ ] 包含整体结论与下一步建议
-- 写入后自检（落盘一致性）：
-  - [ ] 用 `read_file` 重新读取 `REVIEW.md`，确认章节顺序与固定模板一致
-  - [ ] 确认无「强红线」违例（见下一节）
-  - 任一缺失：回到对应步骤补全后再次 `write_file` 覆盖写入。
+### Dimension 4: UI Design-System Compliance (v1.4, frontend projects only)
 
-## 指令约束
+> Skipped (mark N/A) for `cli` / `script` / `backend_only` projects with no UI.
+> Cross-references `DESIGN_SYSTEM.md` (the token source of truth from dev-design v1.3.0) and `skills/dev-code/references/token-implementation.md` for the consumption rules.
 
-### 强红线（违反必须重写）
+Against `DESIGN_SYSTEM.md`'s tokens and anti-patterns, check whether the frontend code consumes them consistently:
 
-- 第一步必须用 `write_file` 写出 `REVIEW.md` 初版（框架），不可跳过、不可后置到流程末尾。
-- **本步骤禁止 `write_file` 修改 `code/` 下任何代码文件**。评审者只评审，不修复；修复交由 dev-selfcheck。违反此约束等于越权。
-- 每条评审意见必须可定位（文件路径 + 行号 或 代码片段），禁止「代码质量一般」「建议优化」这类无定位的空话。
-- P0 功能漏实现必须标「不通过」，不得降级为「警告」或忽略。
-- 不得编造 REQUIREMENT.md / DESIGN.md 中不存在的需求或设计项来「凑」覆盖度。
+- **Color token consistency**: are colors routed through `var(--*)` / Tailwind token classes, with no hardcoded hex drift in components? (A bare hex in a component that should use `var(--primary)` is a "warning"; a widespread pattern of ignoring tokens is a "fail".)
+- **Typography pairing**: is the heading/body font pairing from DESIGN_SYSTEM.md §3 actually used? Heading font used for headings, body font for body — not mixed arbitrarily. Fonts loaded via the `@import`, not system defaults.
+- **Spacing rhythm**: does padding/margin/gap follow the 4/8dp token scale from DESIGN_SYSTEM.md §4? Arbitrary px values (e.g. `padding: 13px`) are flagged as "warning".
+- **Icon family unity**: are all icons from one family (Lucide / Heroicons) with consistent stroke-width? Mixed icon families or emoji-as-structural-icons is a "warning" (dev-selfcheck will fail it as CRITICAL).
+- **Visual hierarchy**: is hierarchy established via size / spacing / contrast — not color alone? Status indicators relying solely on color (a red dot with no text/icon) are flagged.
+- **Anti-pattern hits**: does the code hit any anti-pattern listed in DESIGN_SYSTEM.md §6 (e.g. a finance project using AI purple-pink gradients, a healthcare project using high-saturation red)? A hit is a "warning" or "fail" depending on severity.
+- **Token file integrity**: does `tokens.css` exist and match DESIGN_SYSTEM.md §2–§5? A missing or divergent `tokens.css` is a "fail".
 
-### 建议项（鼓励但不强制）
+Findings here are design-time drift signals — they point dev-selfcheck at where the UI gate will likely fail.
 
-- 评审意见按严重度排序：blocker（阻断）→ major（重要）→ minor（次要）→ nit（建议）。
-- 对每个 blocker 给出「建议修复方向」（一句话即可，不写完整修复代码）。
-- 若整体结论是「建议先返工 dev-code」，明确列出必须返工的 P0 缺失项。
-- 评审可引用 REQUIREMENT.md / DESIGN.md 的原文片段作为对照依据。
+## Execution Steps
 
-## 工程规范
+Execute the following 10 steps in order:
 
-### 评审清单按项目类型适配
+1. **Step 1: immediately write the `REVIEW.md` skeleton with `write_file`**. Write to the root, containing the four-dimension checklist template (Dimension 4 marked N/A for non-frontend projects), each item marked "pending review". This step MUST NOT be skipped or deferred.
+2. **Read requirements & design**: use `read_file` to read `REQUIREMENT.md` and `DESIGN.md`, extracting the P0/P1 feature list, directory structure, interface table, data model. **For frontend projects (v1.4)**: also use `read_file` to read `DESIGN_SYSTEM.md` if it exists, extracting the color/typography/spacing tokens and the anti-pattern list (§6) as the UI compliance baseline.
+3. **Get the change scope (diff review, v1.2)**:
+   - Prefer `run_command` to run `git diff <base>..HEAD -- code/` to get the change patch produced by dev-code (base inferred from `_ledger.md`'s base_commit field or git log).
+   - Also run `git diff --stat <base>..HEAD` to get the changed file list as the review scope.
+   - If dev-code ran for the first time (no base), base is the init commit; the diff is the full code (equivalent to a full scan but via the git channel).
+   - **Git-unavailable fallback**: use `list_files` to recursively scan `code/` and build a full file list; mark "non-diff review: git unavailable" in REVIEW.md.
+   - Use `read_file` to read the full content of key files touched by the diff (the diff alone is not enough — context is needed to judge design consistency).
+4. **Requirement coverage review**: check P0/P1 one by one, recording coverage (implemented / partial / missing / over-implemented). Coverage checking still requires the full code (the diff only shows additions, but coverage requires checking whether something is implemented).
+5. **Design consistency review**: against DESIGN.md's structured design, record deviations. Focus on whether the directories / interfaces / data models newly added in the diff align with the design.
+6. **Potential defects review**: **focus on the newly added/modified code in the diff**, scan by defect category, record findings (file + line/fragment + category + severity). The advantage of diff review: only review what actually changed in this step, not re-review unchanged parts.
+7. **UI design-system compliance review (v1.4, frontend projects only)**: against `DESIGN_SYSTEM.md`'s tokens and §6 anti-patterns, review the frontend code in the diff for Dimension 4 — color token consistency (no hardcoded hex drift), typography pairing usage, spacing rhythm (4/8dp), icon family unity, visual hierarchy (not color alone), and anti-pattern hits. Use `run_command` to grep the diff for bare hex / arbitrary px as evidence. Mark N/A and skip for non-frontend projects.
+8. **Incremental re-review (rerun case)**: if this step is a rerun (the previous round produced REVIEW.md), only review the fix_base..HEAD incremental change. Do not re-record issues that passed in the previous round; only mark "whether the previous blocker is fixed".
+9. **Aggregate scoring**: give each dimension a "pass / warning / fail" with a one-sentence rationale; give an overall conclusion (recommend proceeding to dev-selfcheck / recommend reworking dev-code first).
+10. **Update REVIEW.md**: use `write_file` to overwrite the complete `REVIEW.md`, then run the post-check.
 
-| 项目类型 | 需求覆盖度核对重点 | 设计一致性核对重点 |
-| --- | --- | --- |
-| `fullstack` | P0 接口是否都有路由实现、数据库表是否都建了、鉴权是否实现 | API 路径/方法/参数与 DESIGN.md 接口表一致；表结构与 ER 图一致 |
-| `frontend_only` | P0 页面是否都有对应组件、交互是否实现、状态管理是否覆盖 | 页面路由与路由表一致；组件树与设计一致；数据存储方案与设计一致 |
-| `backend_only` | P0 接口是否都有实现、数据模型是否落地 | API 接口表与设计一致；分层结构与设计一致 |
-| `cli` | P0 子命令是否都有实现、参数解析是否覆盖 | 子命令结构与 DESIGN.md 一致；参数表与设计一致；退出码约定一致 |
-| `script` | P0 处理流程是否实现、输入输出格式是否符合 | 处理流程与 DESIGN.md 流程图一致；输入输出格式与设计一致 |
+## Post-checks
 
-### 严重度定义
+Run a self-check before and after the final `write_file` of `REVIEW.md`. Missing items must be filled before delivery:
 
-- **blocker**：P0 功能未实现 / 安全漏洞 / 启动命令不可执行 → 必须修复才能交付。
-- **major**：P1 功能未实现 / 设计显著偏离 / 依赖缺失 → 建议修复。
-- **minor**：P2 未实现 / 代码风格问题 / 注释缺失 → 可延后。
-- **nit**：命名建议 / 微优化 → 可忽略。
+- Pre-write check (content completeness):
+  - [ ] REVIEW.md has the four-dimension sections (requirement coverage / design consistency / potential defects / UI design-system compliance — Dimension 4 marked N/A for non-frontend projects)
+  - [ ] Every P0 feature has a clear conclusion (implemented / partial / missing + location)
+  - [ ] Design deviations are listed one by one (file + deviation point + intentional or not)
+  - [ ] Potential defects are grouped by category, each with file path and severity
+  - [ ] **For frontend projects, Dimension 4 findings are listed** (token consistency / typography / spacing / icons / hierarchy / anti-patterns), each locatable to a file
+  - [ ] Includes an overall conclusion and next-step recommendation
+- Post-write check (on-disk consistency):
+  - [ ] Re-read `REVIEW.md` with `read_file`, confirm section order matches the fixed template
+  - [ ] Confirm no "Hard Constraints" violations (see below)
+  - On any miss: go back to the relevant step, fill the gap, and `write_file` (overwrite) again.
 
-### REVIEW.md 固定模板
+## Hard Constraints (Red Lines — violation requires rewrite)
 
-报告必须严格按以下章节顺序组织，章节标题不得调换或省略：
+- Step 1 MUST use `write_file` to write the `REVIEW.md` skeleton. It MUST NOT be skipped or deferred to the end of the flow.
+- **This step is FORBIDDEN from using `write_file` to modify any code file under `code/`.** The reviewer only reviews, never fixes; fixes are left to dev-selfcheck. Violating this is an overreach of authority.
+- Every finding MUST be locatable (file path + line number or code snippet). Vague statements like "code quality is mediocre" / "suggest optimizing" are FORBIDDEN.
+- A missing P0 feature implementation MUST be marked "fail" — it MUST NOT be downgraded to "warning" or ignored.
+- Do NOT fabricate requirements or design items not present in REQUIREMENT.md / DESIGN.md to "pad" coverage.
 
-1. **评审概要**：项目类型、评审范围（文件数 / 类型）、评审时间、整体结论（通过 / 有条件通过 / 不通过）。
-2. **需求覆盖度**：P0/P1 逐条核对表（功能项 / 状态 / 定位文件 / 备注），过度实现清单。
-3. **设计一致性**：目录结构对比、接口/路由/命令对比、数据模型对比、偏离项清单（每条含文件 + 偏离点 + 是否有意）。
-4. **潜在缺陷**：按 blocker / major / minor / nit 分组，每条含文件路径 + 行号/片段 + 问题描述 + 建议修复方向。
-5. **维度评分**：三维度分别打分（通过 / 警告 / 不通过）+ 一句话理由。
-6. **整体结论与建议**：是否建议进入 dev-selfcheck；若建议返工 dev-code，列出必须修复的 blocker 清单。
+## Recommendations (encouraged, not mandatory)
 
-## 工具与异常
+- Sort findings by severity: blocker → major → minor → nit.
+- Give a "suggested fix direction" for each blocker (one sentence is enough; do not write full fix code).
+- If the overall conclusion is "recommend reworking dev-code first", explicitly list the P0 gaps that must be reworked.
+- The review may quote original snippets from REQUIREMENT.md / DESIGN.md as a comparison basis.
 
-- `list_files`：扫描 `code/` 目录建立代码文件清单；前置校验时确认目录与代码文件存在。
-- `read_file`：读取 `REQUIREMENT.md`、`DESIGN.md`、`code/` 下的代码文件、`code/RUN.md`；后置自检时重新读取落盘的 `REVIEW.md`。
-- `write_file`：**只能**用于写出 `REVIEW.md`（初版框架 + 最终覆盖）。禁止修改 `code/` 下任何文件。
-- 本步骤**不使用** `run_command`，不做语法检查或运行时验证（那是 dev-selfcheck 的职责）。
-- 异常处理：
-  - 若 `REQUIREMENT.md` / `DESIGN.md` / `code/` 缺失：终止，不写报告，返回提示。
-  - 若 `code/` 无代码文件：终止，提示先执行 dev-code。
-  - 若后置自检发现强红线违例：回到对应步骤修正后重新 `write_file`，禁止带病交付。
+## Engineering Conventions
 
-## 关键约束
+### Review Checklist by Project Type
 
-- 评审者只评审，不修复代码；修复交由 dev-selfcheck。
-- 每条评审意见必须可定位（文件 + 行号/片段），禁止空话。
-- P0 漏实现必须标「不通过」，不得降级。
-- REVIEW.md 必须产出，即使代码完全没问题也要写报告（全通过亦需完整记录）。
-- 第一步必须先写 REVIEW.md 框架，不可跳过。
-- 评审聚焦「需求覆盖度 / 设计一致性 / 潜在缺陷」三维度，不做语法检查（语法交给 dev-selfcheck）。
-- 全文使用中文，不使用 emoji。
+| Project type | Coverage focus | Consistency focus | UI compliance focus (v1.4) |
+| --- | --- | --- | --- |
+| `fullstack` | Are P0 endpoints all routed? Are DB tables all created? Is auth implemented? | API path/method/params match DESIGN.md table; table structure matches ER diagram | Frontend consumes DESIGN_SYSTEM.md tokens; no bare hex; typography/spacing/icon family consistent |
+| `frontend_only` | Are P0 pages all componentized? Are interactions implemented? Does state management cover them? | Page routes match route table; component tree matches design; storage scheme matches design | Same as fullstack frontend checks; anti-patterns from DESIGN_SYSTEM.md §6 not hit |
+| `backend_only` | Are P0 endpoints all implemented? Is the data model landed? | API table matches design; layering matches design | N/A (no UI) |
+| `cli` | Are P0 subcommands all implemented? Does arg parsing cover them? | Subcommand structure matches DESIGN.md; arg table matches design; exit code convention matches | N/A (no UI) |
+| `script` | Is the P0 processing flow implemented? Does the IO format match? | Processing flow matches DESIGN.md flowchart; IO format matches design | N/A (no UI) |
+
+### Severity Definitions
+
+- **blocker**: P0 feature unimplemented / security hole / startup command not executable → MUST be fixed before delivery.
+- **major**: P1 feature unimplemented / significant design deviation / missing dependency → recommended fix.
+- **minor**: P2 unimplemented / code style issues / missing comments → deferrable.
+- **nit**: naming suggestions / micro-optimizations → ignorable.
+
+### REVIEW.md Fixed Template
+
+The report MUST strictly follow this section order. Section titles must not be swapped or omitted:
+
+1. **Review Summary**: project type, review scope (file count / types), review time, **review mode (diff review / full scan) + diff base..head**, overall conclusion (pass / conditional pass / fail).
+2. **Requirement Coverage**: P0/P1 item-by-item check table (feature / status / location file / notes), over-implementation list.
+3. **Design Consistency**: directory structure comparison, interface/route/command comparison, data model comparison, deviation list (each with file + deviation point + intentional or not).
+4. **Potential Defects**: grouped by blocker / major / minor / nit, each with file path + line/fragment + problem description + suggested fix direction.
+5. **UI Design-System Compliance (frontend projects only, v1.4)**: token consistency / typography pairing / spacing rhythm / icon family / visual hierarchy / anti-pattern hits, each locatable to a file; paste grep evidence for bare-hex / arbitrary-px scans. Mark N/A for non-frontend projects.
+6. **Dimension Scoring**: each of the four dimensions scored (pass / warning / fail) + a one-sentence rationale.
+7. **Overall Conclusion & Recommendation**: whether to proceed to dev-selfcheck; if reworking dev-code is recommended, list the blocker checklist that must be fixed.
+
+## Tools & Error Handling
+
+- `list_files`: scan `code/` to build a code file list (fallback when git unavailable); confirm the directory and code files exist during pre-checks.
+- `read_file`: read `REQUIREMENT.md`, `DESIGN.md`, `_ledger.md` (for base_commit), code files under `code/`, `code/RUN.md`; re-read the on-disk `REVIEW.md` during post-check.
+- `write_file`: **only** used to write `REVIEW.md` (initial skeleton + final overwrite). Modifying any file under `code/` is FORBIDDEN.
+- `run_command`: **v1.2 addition**, run `git diff <base>..HEAD -- code/` and `git diff --stat <base>..HEAD` to get the change scope; run `git rev-parse HEAD` / `git log --oneline` to detect the baseline. On git failure, fall back to full scan; do not block.
+- `dispatch_subagent`: dispatch an independent subagent to perform the review (v1.1); the subagent uses the non-recursive tool set.
+- This step does NOT do syntax checks or runtime verification (that is dev-selfcheck's job), but running `git diff` via `run_command` is allowed.
+- Error handling:
+  - If `REQUIREMENT.md` / `DESIGN.md` / `code/` is missing: terminate, write no report, return a prompt.
+  - If `code/` has no code files: terminate, prompt to run dev-code first.
+  - If git is unavailable (`git rev-parse` fails): fall back to full-scan mode; mark "non-diff review" in REVIEW.md.
+  - If a post-check finds a red-line violation: go back to the relevant step, fix, and re-`write_file`. Never ship a defective report.
+
+## Key Constraints
+
+- The reviewer only reviews, never fixes code; fixes are left to dev-selfcheck.
+- Every finding MUST be locatable (file + line/fragment); vague statements are FORBIDDEN.
+- A missing P0 implementation MUST be marked "fail"; no downgrading.
+- REVIEW.md MUST be produced — even if the code has no problems at all, a report must be written (a full-pass also requires a complete record).
+- Step 1 MUST write the REVIEW.md skeleton first; it MUST NOT be skipped.
+- The review focuses on four dimensions (requirement coverage / design consistency / potential defects / UI design-system compliance — Dimension 4 is N/A for non-frontend projects) and does NOT do syntax checks (syntax is left to dev-selfcheck).
+- **Output language: Chinese (中文).** Although this skill instruction is in English, ALL generated project artifacts — REVIEW.md content and any other deliverable — MUST be written in Chinese. Do not use emoji.

@@ -1,16 +1,26 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ProjectGeneratorAgent — 一句话生成项目</title>
   <link rel="icon" href="/icon.png" type="image/png">
-  <link rel="stylesheet" href="/assets/css/main.css">
+  <link rel="stylesheet" href="/assets/css/main.css?v=7">
+  <!-- 防 FOUC：在样式加载前应用已存主题 -->
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('pga_theme');
+        if (!t && window.matchMedia) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t || 'light');
+      } catch (e) {}
+    })();
+  </script>
   <style>
     .tech-stack-group {
       display: none;
-      padding: 12px;
-      background: var(--bg);
+      padding: var(--space-3);
+      background: var(--bg-subtle);
       border-radius: var(--radius);
       margin-top: 8px;
     }
@@ -23,16 +33,9 @@
       margin-bottom: 8px;
     }
     .tech-stack-row label {
-      font-size: 12px;
+      font-size: var(--text-sm);
       font-weight: 600;
       color: var(--fg-muted);
-    }
-    .tech-stack-row select {
-      padding: 6px 10px;
-      border: 1px solid var(--border-strong);
-      border-radius: var(--radius-sm);
-      background: var(--bg-elevated);
-      font-size: 13px;
     }
     .chip-group {
       display: flex;
@@ -40,16 +43,23 @@
       gap: 6px;
     }
     .chip {
-      padding: 5px 12px;
+      padding: 7px 14px;          /* 接近 44px 触控目标 */
+      min-height: 32px;
       border-radius: 999px;
       border: 1px solid var(--border-strong);
       background: var(--bg-elevated);
-      font-size: 12px;
+      font-size: var(--text-sm);
       cursor: pointer;
-      transition: all 0.15s;
+      transition: background var(--duration) var(--ease-standard),
+                  border-color var(--duration) var(--ease-standard),
+                  color var(--duration) var(--ease-standard);
       user-select: none;
+      display: inline-flex;
+      align-items: center;
+      -webkit-tap-highlight-color: transparent;
     }
-    .chip:hover { border-color: var(--primary); }
+    .chip:hover { border-color: var(--primary); color: var(--primary); }
+    .chip:focus-visible { box-shadow: var(--focus-ring); }
     .chip.active {
       background: var(--primary-light);
       border-color: var(--primary);
@@ -58,41 +68,71 @@
     }
     .design-style-desc { display: none; }
     .design-style-desc.active { display: block; }
+    .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .quick-chip {
+      font-size: var(--text-xs);
+      padding: 5px 11px;
+      border-radius: 999px;
+      border: 1px dashed var(--border-strong);
+      background: transparent;
+      color: var(--fg-muted);
+      cursor: pointer;
+      transition: all var(--duration) var(--ease-standard);
+    }
+    .quick-chip:hover { border-color: var(--primary); color: var(--primary); border-style: solid; }
   </style>
 </head>
 <body>
+  <a href="#main-content" class="sr-only">跳到主要内容</a>
   <!-- 顶部导航 -->
-  <nav class="navbar">
+  <nav class="navbar" role="navigation" aria-label="主导航">
     <div class="navbar-brand">
-      <img src="/icon.png" alt="PGA" style="width: 28px; height: 28px; border-radius: 6px;">
+      <img src="/icon.png" alt="PGA Logo" style="width: 28px; height: 28px; border-radius: 6px;">
       <span>ProjectGeneratorAgent</span>
     </div>
     <div class="navbar-actions">
-      <button class="btn btn-ghost btn-icon" id="refresh-btn" title="刷新">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      <button class="btn btn-ghost btn-icon" id="refresh-btn" type="button" aria-label="刷新工作流列表" title="刷新">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
       </button>
-      <a href="/settings.html" class="btn btn-ghost btn-icon" title="设置">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      <button class="btn btn-ghost btn-icon" type="button" data-theme-toggle aria-label="切换到暗色模式" title="暗色模式">
+        <svg class="icon-moon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+      </button>
+      <a href="/settings.html" class="btn btn-ghost btn-icon" aria-label="打开设置页面" title="设置">
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
       </a>
     </div>
   </nav>
 
-  <div class="page-container">
+  <div class="page-container" id="main-content">
     <div class="home-layout">
       <!-- 左侧：创建工作流 -->
       <div class="card">
         <div class="card-header">
-          <span>🚀 启动新工作流</span>
+          <span style="display:inline-flex;align-items:center;gap:8px;">
+            <span class="header-icon">
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </span>
+            启动新工作流
+          </span>
         </div>
         <div class="card-body">
           <div class="form-group">
-            <label class="form-label">一句话需求</label>
-            <textarea class="form-textarea" id="req-title" rows="3"
+            <label class="form-label" for="req-title">一句话需求<span class="required" aria-hidden="true">*</span></label>
+            <textarea class="form-textarea" id="req-title" rows="3" required
+              aria-required="true" aria-describedby="req-title-help"
               placeholder="例：做一个带用户登录的待办事项 Web 应用"></textarea>
+            <div class="form-helper" id="req-title-help">描述你的项目想法，AI 将自动拆解并生成完整代码。可按 Ctrl/⌘ + Enter 快速启动。</div>
+          </div>
+
+          <div class="quick-actions" role="group" aria-label="需求示例">
+            <button type="button" class="quick-chip" data-req="带用户登录注册的待办事项 Web 应用，需要任务分类和搜索">待办事项应用</button>
+            <button type="button" class="quick-chip" data-req="一个 Markdown 笔记应用，支持标签、全文搜索和暗色模式">Markdown 笔记</button>
+            <button type="button" class="quick-chip" data-req="天气查询命令行工具，输入城市名返回未来三天天气">天气 CLI</button>
           </div>
 
           <div class="form-group">
-            <label class="form-label">项目类型</label>
+            <label class="form-label" for="req-project-type">项目类型</label>
             <select class="form-select" id="req-project-type">
               <option value="fullstack">全栈 Web 应用（前端+后端+数据库）</option>
               <option value="frontend_only">纯前端页面（静态站/交互页面）</option>
@@ -109,25 +149,25 @@
             <div class="tech-stack-group" id="ts-fullstack">
               <div class="tech-stack-row">
                 <label>前端框架</label>
-                <div class="chip-group" data-name="frontend_framework">
-                  <span class="chip active" data-val="React">React</span>
-                  <span class="chip" data-val="Vue">Vue</span>
-                  <span class="chip" data-val="纯HTML+JS">纯HTML+JS</span>
+                <div class="chip-group" data-name="frontend_framework" role="group" aria-label="前端框架">
+                  <span class="chip active" data-val="React" role="button" tabindex="0" aria-pressed="true">React</span>
+                  <span class="chip" data-val="Vue" role="button" tabindex="0" aria-pressed="false">Vue</span>
+                  <span class="chip" data-val="纯HTML+JS" role="button" tabindex="0" aria-pressed="false">纯HTML+JS</span>
                 </div>
               </div>
               <div class="tech-stack-row">
                 <label>后端框架</label>
-                <div class="chip-group" data-name="backend_framework">
-                  <span class="chip active" data-val="FastAPI">FastAPI</span>
-                  <span class="chip" data-val="Flask">Flask</span>
-                  <span class="chip" data-val="Node-Express">Node-Express</span>
+                <div class="chip-group" data-name="backend_framework" role="group" aria-label="后端框架">
+                  <span class="chip active" data-val="FastAPI" role="button" tabindex="0" aria-pressed="true">FastAPI</span>
+                  <span class="chip" data-val="Flask" role="button" tabindex="0" aria-pressed="false">Flask</span>
+                  <span class="chip" data-val="Node-Express" role="button" tabindex="0" aria-pressed="false">Node-Express</span>
                 </div>
               </div>
               <div class="tech-stack-row">
                 <label>数据库</label>
-                <div class="chip-group" data-name="database">
-                  <span class="chip active" data-val="SQLite">SQLite</span>
-                  <span class="chip" data-val="MySQL">MySQL</span>
+                <div class="chip-group" data-name="database" role="group" aria-label="数据库">
+                  <span class="chip active" data-val="SQLite" role="button" tabindex="0" aria-pressed="true">SQLite</span>
+                  <span class="chip" data-val="MySQL" role="button" tabindex="0" aria-pressed="false">MySQL</span>
                 </div>
               </div>
             </div>
@@ -136,10 +176,10 @@
             <div class="tech-stack-group" id="ts-frontend_only">
               <div class="tech-stack-row">
                 <label>前端框架</label>
-                <div class="chip-group" data-name="frontend_framework">
-                  <span class="chip active" data-val="React">React</span>
-                  <span class="chip" data-val="Vue">Vue</span>
-                  <span class="chip" data-val="纯HTML+JS">纯HTML+JS</span>
+                <div class="chip-group" data-name="frontend_framework" role="group" aria-label="前端框架">
+                  <span class="chip active" data-val="React" role="button" tabindex="0" aria-pressed="true">React</span>
+                  <span class="chip" data-val="Vue" role="button" tabindex="0" aria-pressed="false">Vue</span>
+                  <span class="chip" data-val="纯HTML+JS" role="button" tabindex="0" aria-pressed="false">纯HTML+JS</span>
                 </div>
               </div>
             </div>
@@ -148,9 +188,9 @@
             <div class="tech-stack-group" id="ts-cli">
               <div class="tech-stack-row">
                 <label>编程语言</label>
-                <div class="chip-group" data-name="language">
-                  <span class="chip active" data-val="Python">Python</span>
-                  <span class="chip" data-val="Node">Node</span>
+                <div class="chip-group" data-name="language" role="group" aria-label="编程语言">
+                  <span class="chip active" data-val="Python" role="button" tabindex="0" aria-pressed="true">Python</span>
+                  <span class="chip" data-val="Node" role="button" tabindex="0" aria-pressed="false">Node</span>
                 </div>
               </div>
             </div>
@@ -159,16 +199,16 @@
             <div class="tech-stack-group" id="ts-script">
               <div class="tech-stack-row">
                 <label>编程语言</label>
-                <div class="chip-group" data-name="language">
-                  <span class="chip active" data-val="Python">Python</span>
-                  <span class="chip" data-val="Node">Node</span>
+                <div class="chip-group" data-name="language" role="group" aria-label="编程语言">
+                  <span class="chip active" data-val="Python" role="button" tabindex="0" aria-pressed="true">Python</span>
+                  <span class="chip" data-val="Node" role="button" tabindex="0" aria-pressed="false">Node</span>
                 </div>
               </div>
             </div>
           </div>
 
           <div class="form-group">
-            <label class="form-label">设计风格</label>
+            <label class="form-label" for="req-design-style">设计风格</label>
             <select class="form-select" id="req-design-style">
               <option value="auto">系统自动 — AI按项目选</option>
               <option value="minimal">极简专业 — 工具/SaaS</option>
@@ -197,8 +237,8 @@
             </label>
           </div>
 
-          <button class="btn btn-primary" id="start-btn" style="width: 100%; justify-content: center; padding: 11px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          <button class="btn btn-primary" id="start-btn" type="button" style="width: 100%; justify-content: center; padding: 11px;">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
             启动工作流
           </button>
         </div>
@@ -207,20 +247,27 @@
       <!-- 右侧：工作流列表 -->
       <div>
         <div class="flex items-center justify-between mb-2">
-          <h2 style="margin: 0; font-size: 16px;">工作流列表</h2>
+          <h2 style="margin: 0; font-size: var(--text-md); display:inline-flex; align-items:center; gap:8px;">
+            <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--fg-muted);"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            工作流列表
+          </h2>
           <span class="text-sm text-muted" id="workflow-count"></span>
         </div>
-        <div class="workflow-list" id="workflow-list">
+        <div class="workflow-list" id="workflow-list" aria-live="polite">
           <div class="empty-state">
-            <div class="empty-state-icon">∅</div>
-            <div class="empty-state-text">暂无工作流，从左侧创建一个吧</div>
+            <div class="empty-state-icon">
+              <svg aria-hidden="true" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="M7 14l3-3 3 3 5-5"></path></svg>
+            </div>
+            <div class="empty-state-text">暂无工作流</div>
+            <div class="empty-state-hint">在左侧描述需求并启动即可</div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/assets/js/api.js"></script>
-  <script src="/assets/js/app.js"></script>
+  <script src="/assets/js/api.js?v=7"></script>
+  <script src="/assets/js/theme.js?v=7"></script>
+  <script src="/assets/js/app.js?v=7"></script>
 </body>
 </html>

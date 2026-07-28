@@ -1,134 +1,179 @@
 ---
 name: dev-selfcheck
-version: 1.0.0
+version: 1.4.0
+description: Use when code/ and RUN.md exist and the generated project must be verified runnable before delivery — runs syntax checks, executes the test suite, validates runtime behavior, adds a UI quality gate (token discipline, contrast, accessibility, responsive) for frontend projects, fixes found issues, and produces SELF_CHECK.md with fresh verification evidence
 inputs: [$ARGUMENTS]
 outputs: [SELF_CHECK.md]
 depends_on: [code/RUN.md, REQUIREMENT.md, DESIGN.md]
-est_tokens: 4000
-est_iters: 12
+est_tokens: 5000
+est_iters: 17
 ---
 
-# 自测验证 (dev-selfcheck)
+# Self-Check & Verification (dev-selfcheck)
 
-## 任务目标
+## Overview
 
-对 `code/` 目录下的全部代码做语法检查、一致性检查与运行时验证，修复发现的问题，并产出 `SELF_CHECK.md` 报告。作为「一句话生成项目」工作流的第四步，承接 `dev-code` 产物，确保交付的项目可直接运行。本步骤只做检查与修复，不新增功能、不重写项目。
+**Core principle:** Evidence before claims, always. The project is not "done" until tests pass with fresh output — not "files exist and syntax is OK".
 
-## 输入
+## Objective
 
-- `$ARGUMENTS`：用户原始需求（仅作参考）
-- 工作区已有文件（必读 `REQUIREMENT.md`、`DESIGN.md`、`code/RUN.md`，扫描整个 `code/` 目录）
+Run **syntax checks, test execution, consistency checks, and runtime verification** on all code under `code/`, fix found issues, and produce a `SELF_CHECK.md` report. As the fourth step of the "one-sentence-to-project" workflow, it takes over the `dev-code` output and ensures the delivered project is **verified runnable**. This step only checks and fixes — it does not add features or rewrite the project.
 
-## 前置校验
+> **v1.1 change**: introduced the verification-before-completion gate. "File exists + syntax passes" is no longer accepted as proof of completion — the test suite MUST be executed and the passing evidence pasted. Adapted from superpowers `NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE`.
 
-进入正式自测前必须完成以下校验，任一不通过则终止并给出原因，不产出空报告：
+> **v1.3 change**: added a UI quality gate. For frontend projects (fullstack / frontend_only / pure HTML+JS), an additional check dimension is now enforced — token discipline (no bare hex / arbitrary px, fonts via @import), icon discipline (no emoji as structural icons), color contrast (≥ 4.5:1), touch targets (≥ 44px), accessibility (alt / aria-label / focus ring / reduced-motion), and responsive (viewport meta + breakpoints). See `references/ui-pre-delivery-checklist.md` for the full gate. This gate is additive to the existing seven check categories and reuses the same evidence-before-claims principle (grep outputs MUST be pasted, not "looks fine").
 
-1. **code/ 目录存在性检查**：用 `list_files` 扫描工作区根目录，确认 `code/` 目录存在。若不存在，立即终止，提示「code/ 目录缺失，请先执行 dev-code 步骤」，不调用 `write_file`。
-2. **代码文件存在性检查**：用 `list_files` 递归扫描 `code/` 目录，确认其中存在代码文件（`.py` / `.js` / `.ts` / `.jsx` / `.tsx` / `.html` / `.css` 等）。若目录为空或仅含文档，终止并提示「code/ 目录无代码文件，请先执行 dev-code 步骤」。
-3. **RUN.md 存在性检查**：用 `read_file` 读取 `code/RUN.md`。若文件不存在，终止并提示「RUN.md 缺失，请先执行 dev-code 步骤补全启动说明」。
-4. **项目类型解析**：从 `REQUIREMENT.md` 中解析 `project_type`（`fullstack` / `frontend_only` / `cli` / `script` / `backend_only`），作为后续按类型选择检查清单的依据。若缺失，按 `code/` 目录结构推断并在报告中显式标注假设。
+> **v1.4 change**: enforced SELF_CHECK.md completeness. The health check now rejects SELF_CHECK.md files that contain more than 3 residual markers (`pending` / `待填充` / `待完成` / `待检查`). Writing the skeleton in Step 1 and then ending without filling it in is NO LONGER accepted — every check item MUST have a concrete PASS / FAIL + evidence result.
 
-## 执行步骤
+## Inputs
 
-按顺序执行以下 8 步，发现问题即时修复并记录：
+- `$ARGUMENTS`: the user's original request (reference only)
+- Existing workspace files (MUST read `REQUIREMENT.md`, `DESIGN.md`, `code/RUN.md`; scan the entire `code/` directory)
 
-1. **第一步：立即用 `write_file` 写出 `SELF_CHECK.md` 初版**（框架）。写入根目录，包含完整检查项清单模板（语法 / 标签 / 路径 / 依赖 / 启动命令 / 运行时验证），每项标记为「待检查」。此步不可跳过、不可后置。
-2. **扫描文件清单**：用 `list_files` 递归扫描 `code/` 目录下所有文件，建立待检查文件清单（按扩展名分类：`.py` / `.js` / `.ts` / `.jsx` / `.tsx` / `.html` / `.css` / 配置文件）。
-3. **Python 语法检查**：对每个 `.py` 文件用 `run_command` 执行 `python -m py_compile <file>` 做 `compile()` 语法检查，记录通过 / 失败结果。
-4. **前端语法与标签检查**：对每个 `.js` / `.ts` / `.jsx` / `.tsx` 文件做括号匹配检查（可用 `run_command` 执行 `node --check` 或人工核对 `()` / `[]` / `{}` 配对）；对每个 `.html` 文件做标签闭合检查（含自闭合标签）。
-5. **运行时验证**（按项目类型对号入座，参见「工程规范 - 运行时验证检查项」）：fetch 检查、资源路径检查、模块导入检查、入口文件检查。
-6. **RUN.md 启动命令检查**：核对 `RUN.md` 中的启动命令是否可执行、引用的入口文件是否实际存在、命令与文件结构是否匹配。
-7. **修复问题**：对前序步骤发现的 FAIL 项，用 `write_file` 修复对应代码文件（只修有问题的文件，不重写整个项目），同步记录修复动作。
-8. **更新 SELF_CHECK.md**：用 `write_file` 覆盖写入最终的 `SELF_CHECK.md`，填入每项检查结果（PASS / FAIL + 原因）、已修复问题、未修复问题，完成后置自检。
+## Pre-checks
 
-## 后置自检
+Before formal self-check, complete the following checks. If any fails, terminate with a reason and do not produce an empty report:
 
-在最后一次 `write_file` 写入 `SELF_CHECK.md` 前后各做一次自检，缺失项必须补全后再交付：
+1. **code/ directory existence**: use `list_files` to scan the workspace root and confirm `code/` exists. If missing, terminate immediately with "code/ missing, run dev-code first" and do NOT call `write_file`.
+2. **Code file existence**: use `list_files` to recursively scan `code/` and confirm it contains code files (`.py` / `.js` / `.ts` / `.jsx` / `.tsx` / `.html` / `.css` etc.). If the directory is empty or contains only docs, terminate with "code/ has no code files, run dev-code first".
+3. **RUN.md existence**: use `read_file` to read `code/RUN.md`. If missing, terminate with "RUN.md missing, run dev-code first to complete the startup guide".
+4. **project_type parsing**: parse `project_type` from `REQUIREMENT.md` (`fullstack` / `frontend_only` / `cli` / `script` / `backend_only`) as the basis for selecting the per-type checklist. If missing, infer from the `code/` directory structure and explicitly note the assumption in the report.
 
-- 写入前自检（内容完整性）：
-  - [ ] SELF_CHECK.md 包含检查项清单（语法 / 标签 / 路径 / 依赖 / 启动命令 / 运行时验证六类齐全）
-  - [ ] 每项检查有明确结果（PASS 或 FAIL + 原因），无「待检查」遗留
-  - [ ] 已修复问题逐条记录（文件路径 + 问题描述 + 修复方式）
-  - [ ] 未修复问题（如有）说明原因与影响
-  - [ ] 包含总结段（整体结论 / 残留风险点）
-- 写入后自检（落盘一致性）：
-  - [ ] 用 `read_file` 重新读取 `SELF_CHECK.md`，确认章节顺序与固定模板一致
-  - [ ] 确认所有 FAIL 项均已修复或在「未修复问题」中有交代
-  - [ ] 确认无「强红线」违例（见下一节）
-  - 任一缺失：回到对应步骤补全后再次 `write_file` 覆盖写入。
+## Execution Steps
 
-## 指令约束
+Execute the following 10 steps in order. Fix issues as found and record them:
 
-### 强红线（违反必须重写）
+1. **Step 1: immediately write the `SELF_CHECK.md` skeleton with `write_file`**. Write to the root, containing the complete checklist template (syntax / **test execution** / tags / paths / deps / startup command / runtime verification), each item marked "pending check". This step MUST NOT be skipped or deferred.
+2. **Scan file list**: use `list_files` to recursively scan all files under `code/`, building a to-check file list (classified by extension: `.py` / `.js` / `.ts` / `.jsx` / `.tsx` / `.html` / `.css` / config).
+3. **Python syntax check**: for each `.py` file, use `run_command` to run `python -m py_compile <file>` for a `compile()` syntax check; record pass / fail.
+4. **Frontend syntax & tag check**: for each `.js` / `.ts` / `.jsx` / `.tsx` file, do a bracket-matching check (use `run_command` to run `node --check` or manually verify `()` / `[]` / `{}` pairing); for each `.html` file, do a tag-closing check (including self-closing tags).
+5. **Test directory check (red line)**: use `list_files` to confirm that `code/tests/` or `code/backend/tests/` etc. exists. **If not, immediately use `write_file` to create `code/tests/__init__.py` + `code/tests/test_main.py` skeleton** (at least one smoke test: `def test_imports(): import main` or `def test_health(): ...`), and add `pytest>=7.0` to `requirements.txt`. A missing test directory is a FAIL.
+6. **Test execution (red line, verification gate)**: use `run_command` to run `python -m pytest code/tests/ -v --tb=short 2>&1` (or `npm test --prefix code/frontend 2>&1`). **MUST paste the exit_code and an output summary.** On test failure, fix until `exit_code: 0` before advancing. A self-check report with no test-passing evidence is considered incomplete.
+7. **Runtime verification** (per project type — see "Engineering Conventions - Runtime Verification Items"):
+   - `fullstack` / `backend_only`: start the backend in the background `python -m uvicorn code.backend.main:app --port 8765`, sleep 3s, call `/health` and verify 200
+   - `cli` / `script`: run `python code/main.py --help` and verify exit_code 0
+   - `frontend_only`: skip (needs a browser)
+8. **UI quality gate (v1.3, frontend projects only)**: if `project_type` is `fullstack` or `frontend_only` (or pure HTML+JS), run the UI checks defined in `references/ui-pre-delivery-checklist.md`. This includes:
+   - **Token discipline**: use `run_command` to grep for bare hex (`#[0-9a-fA-F]{3,8}`) and arbitrary px in spacing across component files (exclude `tokens.css`); confirm `tokens.css` exists and is imported; confirm fonts are loaded via `@import` (not system defaults).
+   - **Icon discipline**: scan for emoji used as structural UI icons (navigation / settings / system-control buttons).
+   - **Color contrast**: LLM-judge the key foreground/background token pairs from `tokens.css` against WCAG AA (≥ 4.5:1 body, ≥ 3:1 large text), citing actual token values.
+   - **Touch targets**: scan interactive elements for min 44×44px on mobile.
+   - **Accessibility**: grep `img` for `alt`, icon-only `<button>` for `aria-label`, forms for label association, CSS for a visible `:focus`/`:focus-visible` ring and `@media (prefers-reduced-motion)`.
+   - **Responsive**: confirm viewport meta tag and mobile-first breakpoints (375/768/1024/1440).
+   - Each grep-based check MUST paste the actual command + output (hit count / sample lines); LLM-judged checks MUST cite the inspected token values / snippets. Mark N/A for `cli` / `script` / `backend_only` projects with no UI.
+9. **RUN.md startup command check**: verify that the startup commands in `RUN.md` are executable, that the referenced entry files actually exist, and that the commands match the file structure.
+10. **Fix issues**: for FAIL items found in previous steps, use `write_file` to fix the corresponding code files (only fix problem files; do not rewrite the whole project) and record the fix actions. **After fixing, you MUST re-run the relevant tests** (e.g. if you changed main.py, re-run `pytest code/tests/test_main.py`; if you fixed a token violation, re-run the grep to confirm the bare hex is gone).
+11. **Update SELF_CHECK.md**: use `write_file` to overwrite the final `SELF_CHECK.md`, filling in each check result (PASS / FAIL + reason + **verification evidence**), fixed issues, unfixed issues, then run the post-check.
 
-- 第一步必须用 `write_file` 写出 `SELF_CHECK.md` 初版（框架），不可跳过、不可后置到流程末尾。
-- 所有 `.py` 文件必须通过 `compile()` 语法检查（`python -m py_compile`）；存在语法错误必须修复至通过。
-- 所有 `.js` / `.ts` / `.jsx` / `.tsx` 文件括号必须匹配（`()` / `[]` / `{}` 配对闭合）。
-- 所有 `.html` 文件标签必须闭合（含自闭合标签），不得有未闭合的 `<div>` / `<script>` / `<body>` 等。
-- 纯前端项目（`frontend_only` / 纯 HTML+JS）禁止使用 `fetch` / `XMLHttpRequest` 加载本地 JSON 文件；发现必须修复为 `<script>` 标签加载 JS 数据文件，或将数据内联到 HTML / JS。
-- `RUN.md` 必须包含可执行的启动命令（如 `pip install -r requirements.txt && python main.py`、`python -m http.server`），不得仅写「直接打开 index.html」。
-- 所有资源路径必须为相对路径（`./` 开头或不以 `/` 开头），不得出现 `/assets/` 这类绝对路径。
-- 发现问题必须修复，不能只报告不修复；修复后需在 `SELF_CHECK.md` 中记录。
+## Post-checks
 
-### 建议项（鼓励但不强制）
+Run a self-check before and after the final `write_file` of `SELF_CHECK.md`. Missing items must be filled before delivery:
 
-- 检查代码注释是否充分（关键函数 / 复杂逻辑有说明）。
-- 检查错误处理是否完善（异常捕获、边界条件、空值处理）。
-- 检查依赖版本是否兼容（`requirements.txt` / `package.json` 版本号是否冲突或缺失）。
+- Pre-write check (content completeness):
+  - [ ] SELF_CHECK.md has the checklist (all seven categories: syntax / **test execution** / tags / paths / deps / startup command / runtime verification)
+  - [ ] **For frontend projects, the UI quality gate section is present** (token discipline / icon discipline / contrast / touch targets / accessibility / responsive), each with PASS / FAIL / N/A + evidence
+  - [ ] Each check has a clear result (PASS or FAIL + reason + **verification evidence**); no "pending check" left over
+  - [ ] **The test-execution item MUST include the actual `run_command` output (exit_code + summary); "should pass" is NOT allowed**
+  - [ ] **UI grep checks MUST paste the actual grep command + output (hit count / sample lines); "looks fine" is NOT allowed**
+  - [ ] Fixed issues are recorded one by one (file path + problem + fix method + **re-run test evidence after fix**)
+  - [ ] Unfixed issues (if any) explain the reason and impact
+  - [ ] Includes a summary section (overall conclusion / residual risks)
+- Post-write check (on-disk consistency):
+  - [ ] Re-read `SELF_CHECK.md` with `read_file`, confirm section order matches the fixed template
+  - [ ] **Scan for residual markers: `pending` / `待填充` / `待完成` / `待检查` — if more than 3 found, the health check will REJECT the report; fill them in before ending**
+  - [ ] Confirm all FAIL items are fixed or accounted for under "Unfixed Issues"
+  - [ ] Confirm no "Hard Constraints" violations (see below)
+  - On any miss: go back to the relevant step, fill the gap, and `write_file` (overwrite) again.
 
-## 工程规范
+## Hard Constraints (Red Lines — violation requires rewrite)
 
-### 各项目类型的检查清单
+- Step 1 MUST use `write_file` to write the `SELF_CHECK.md` skeleton. It MUST NOT be skipped or deferred to the end of the flow.
+- **The `code/tests/` directory MUST exist and contain at least one `test_*.py` file** (or `*.test.js`). If not, create a skeleton test in this step.
+- **The test suite MUST be executed and evidence of exit_code 0 pasted** (`pytest` or `npm test`). Skipping test execution or only saying "tests pass" without output is NOT allowed.
+- All `.py` files MUST pass the `compile()` syntax check (`python -m py_compile`); syntax errors MUST be fixed until passing.
+- All `.js` / `.ts` / `.jsx` / `.tsx` files MUST have matched brackets (`()` / `[]` / `{}` closed).
+- All `.html` files MUST have closed tags (including self-closing); unclosed `<div>` / `<script>` / `<body>` etc. are FORBIDDEN.
+- Pure frontend projects (`frontend_only` / pure HTML+JS) MUST NOT use `fetch` / `XMLHttpRequest` to load local JSON files; if found, MUST fix to load JS data files via `<script>` tags, or inline data into HTML / JS.
+- `RUN.md` MUST contain executable startup commands (e.g. `pip install -r requirements.txt && python main.py`, `python -m http.server`); "just open index.html" alone is NOT allowed.
+- All resource paths MUST be relative (`./` prefix or not starting with `/`); absolute paths like `/assets/` are FORBIDDEN.
+- Found issues MUST be fixed, not only reported; after fixing, record in `SELF_CHECK.md` and **re-run relevant tests to verify the fix introduced no regression**.
+- **UI quality gate (v1.3, frontend projects)**: for `fullstack` / `frontend_only` / pure HTML+JS, the UI checks in `references/ui-pre-delivery-checklist.md` MUST be run. A CRITICAL FAIL (bare hex in components, missing `tokens.css`, emoji as structural icons, system-default fonts) blocks delivery until fixed. grep-based checks MUST paste actual command output — "no issues found" without a grep is NOT allowed.
+- **SELF_CHECK.md completeness (v1.4, red line)**: the final `SELF_CHECK.md` MUST NOT contain more than 3 residual markers (`pending` / `待填充` / `待完成` / `待检查`). Writing the Step 1 skeleton and ending without filling in each check item is FORBIDDEN — the health check will reject the report and trigger a retry. Every check item MUST have a concrete result: PASS (+ evidence) or FAIL (+ reason + fix or "unfixed" note).
 
-按 `project_type` 对号入座，执行对应检查项：
+### Verification Before Completion
 
-| 项目类型 | 检查清单 |
+Adapted from superpowers:
+
+```
+NO COMPLETION CLAIMS WITHOUT FRESH VERIFICATION EVIDENCE
+```
+
+- Before claiming "self-check complete", you MUST paste in SELF_CHECK.md the actual output (including exit_code) of the test command run via `run_command` in this step.
+- Hypothetical statements like "should be fine", "probably passes", "ran before" count as unverified.
+- After a fix, you MUST re-run the tests and paste new evidence; old output MUST NOT be referenced.
+- Runtime verification (backend /health 200 / CLI --help 0) also requires pasted evidence.
+
+## Recommendations (encouraged, not mandatory)
+
+- Check whether code comments are sufficient (key functions / complex logic explained).
+- Check whether error handling is sound (exception catching, boundary conditions, null handling).
+- Check whether dependency versions are compatible (version numbers in `requirements.txt` / `package.json` — conflicts or missing).
+
+## Engineering Conventions
+
+### Checklist by Project Type
+
+Match `project_type` and run the corresponding checks:
+
+| Project type | Checklist |
 | --- | --- |
-| `fullstack` | 后端模块导入检查（`cd code/backend && python -c "import main"`）、前端 `package.json` 完整性（依赖 / scripts 齐全）、API 路由与 `REQUIREMENT.md` 功能列表对齐 |
-| `frontend_only` | HTML 资源路径检查（`src` / `href` 为相对路径）、JS `fetch` 检查（禁止加载本地 JSON）、CSS 引用检查（`<link>` 引用的文件实际存在） |
-| `cli` | `--help` 命令可执行（`python main.py --help` 或 `node main.js --help`）、参数解析正确（必填 / 可选 / 默认值） |
-| `script` | `python main.py` 可运行、输入输出格式正确（输入来源 / 输出形式符合 `DESIGN.md`） |
+| `fullstack` | backend module import check (`cd code/backend && python -c "import main"`), frontend `package.json` completeness (deps / scripts), API routes aligned with REQUIREMENT.md feature list |
+| `frontend_only` | HTML resource path check (`src` / `href` are relative), JS `fetch` check (local JSON loading forbidden), CSS reference check (`<link>`-ed files actually exist) |
+| `cli` | `--help` is executable (`python main.py --help` or `node main.js --help`), arg parsing correct (required / optional / default) |
+| `script` | `python main.py` runs, IO format correct (input source / output form per `DESIGN.md`) |
 
-> 备注：`backend_only` 参照 `fullstack` 的后端部分裁剪，前端检查项省略。
+> Note: `backend_only` refers to the backend portion of `fullstack`, trimmed; frontend checks are omitted.
 
-### 运行时验证检查项
+### Runtime Verification Items
 
-- **fetch 检查**：扫描所有 `.js` / `.ts` / `.jsx` / `.tsx` 文件，若发现 `fetch(` 加载本地 `.json` 文件，标记为 FAIL 并修复（改为 `<script>` 标签加载 JS 数据文件，或将数据内联到 HTML / JS）。
-- **路径检查**：HTML 中所有 `src` 和 `href` 必须为相对路径（`./` 开头或不以 `/` 开头）；出现绝对路径标记为 FAIL 并修复。
-- **模块导入检查**：Python 后端的 `import` 语句引用的模块必须在同级目录或已安装的包中（可用 `python -c "import <module>"` 验证）；引用不存在的模块标记为 FAIL 并修复。
-- **入口文件检查**：`RUN.md` 中引用的入口文件（如 `main.py` / `index.html` / `main.js`）必须实际存在于 `code/` 目录；缺失标记为 FAIL 并补全或修正引用。
+- **fetch check**: scan all `.js` / `.ts` / `.jsx` / `.tsx` files; if `fetch(` loading a local `.json` file is found, mark FAIL and fix (change to load a JS data file via `<script>` tag, or inline data into HTML / JS).
+- **Path check**: all `src` and `href` in HTML MUST be relative (`./` prefix or not starting with `/`); absolute paths are marked FAIL and fixed.
+- **Module import check**: Python backend `import` statements must reference modules in the same directory or installed packages (verifiable via `python -c "import <module>"`); referencing non-existent modules is marked FAIL and fixed.
+- **Entry file check**: the entry file referenced in `RUN.md` (e.g. `main.py` / `index.html` / `main.js`) MUST actually exist under `code/`; if missing, mark FAIL and fill it or correct the reference.
 
-### SELF_CHECK.md 固定模板
+### SELF_CHECK.md Fixed Template
 
-报告必须严格按以下章节顺序组织，章节标题不得调换或省略：
+The report MUST strictly follow this section order. Section titles must not be swapped or omitted:
 
-1. **检查概要**：项目类型、检查范围（文件数 / 类型）、检查工具、整体结论（通过 / 有条件通过 / 不通过）。
-2. **检查项清单**：列出六类检查项（语法 / 标签 / 路径 / 依赖 / 启动命令 / 运行时验证），每类说明检查范围与方法。
-3. **每项结果**：逐项给出 PASS / FAIL + 原因（FAIL 需说明具体文件与问题）。
-4. **已修复问题**：逐条记录修复（文件路径 + 问题描述 + 修复方式）。
-5. **未修复问题**：列出未修复项（如有），说明原因与影响、后续建议。
-6. **总结**：整体可运行性结论、残留风险点、是否建议进入交付。
+1. **Check Summary**: project type, check scope (file count / types), check tools, overall conclusion (pass / conditional pass / fail).
+2. **Checklist**: list the seven check categories (syntax / **test execution** / tags / paths / deps / startup command / runtime verification), each describing the scope and method. For frontend projects, also list the UI quality gate categories (token discipline / icon discipline / contrast / touch targets / accessibility / responsive).
+3. **Per-item Results**: give PASS / FAIL + reason + **verification evidence** for each item (FAIL must specify the file and problem; the test-execution item MUST paste run_command output).
+4. **Test Execution Evidence**: a standalone section pasting the full command + exit_code + output summary (last 10-20 lines) of `pytest` / `npm test`.
+5. **UI Quality Gate (frontend projects only)**: paste the grep commands + outputs for token/icon/accessibility checks; cite the token values judged for contrast; mark N/A for non-frontend projects. See `references/ui-pre-delivery-checklist.md` for the compact checklist to embed here.
+6. **Fixed Issues**: record fixes one by one (file path + problem + fix method + **re-run test evidence after fix**).
+7. **Unfixed Issues**: list unfixed items (if any), explaining the reason, impact, and follow-up recommendation.
+8. **Summary**: overall runnability conclusion, residual risks, whether delivery is recommended.
 
-## 工具与异常
+## Tools & Error Handling
 
-- `list_files`：扫描 `code/` 目录，建立待检查文件清单；前置校验时确认目录与代码文件存在。
-- `read_file`：读取 `code/` 下的代码文件、`RUN.md`、`REQUIREMENT.md`、`DESIGN.md`；后置自检时重新读取落盘的 `SELF_CHECK.md`。
-- `write_file`：第一步写出 `SELF_CHECK.md` 初版（框架）；修复有问题的代码文件；最终覆盖写入完整的 `SELF_CHECK.md`。
-- `run_command`：执行语法检查（`python -m py_compile <file>`、`node --check <file>`）与运行时验证（`python -c "import main"`、`python main.py --help`）；单次调用超时 60 秒，超时或失败不影响整体流程，仅将该次检查标记为 FAIL 并记录原因。
-- 异常处理：
-  - 若 `code/` 目录缺失或无代码文件：终止，不写报告，返回提示。
-  - 若 `RUN.md` 缺失：终止，提示先执行 dev-code 补全。
-  - 若 `run_command` 超时或失败：标记对应检查项为 FAIL 并记录原因，不阻塞后续检查。
-  - 若后置自检发现强红线违例：回到对应步骤修复后重新 `write_file`，禁止带病交付。
+- `list_files`: scan `code/` to build the to-check file list; confirm the directory and code files exist during pre-checks.
+- `read_file`: read code files under `code/`, `RUN.md`, `REQUIREMENT.md`, `DESIGN.md`; re-read the on-disk `SELF_CHECK.md` during post-check.
+- `write_file`: step 1 writes the `SELF_CHECK.md` skeleton; fix problem code files; finally overwrite the complete `SELF_CHECK.md`.
+- `run_command`: run syntax checks (`python -m py_compile <file>`, `node --check <file>`) and runtime verification (`python -c "import main"`, `python main.py --help`); single-call timeout 60s. A timeout or failure does not block the overall flow — it only marks that check FAIL and records the reason.
+- Error handling:
+  - If `code/` is missing or has no code files: terminate, write no report, return a prompt.
+  - If `RUN.md` is missing: terminate, prompt to run dev-code to complete it first.
+  - If `run_command` times out or fails: mark the corresponding check FAIL and record the reason; do not block subsequent checks.
+  - If a post-check finds a red-line violation: go back to the relevant step, fix, and re-`write_file`. Never ship a defective report.
 
-## 关键约束
+## Key Constraints
 
-- `SELF_CHECK.md` 必须产出，即使代码完全没问题也要写报告（全 PASS 亦需完整记录）。
-- 第一步必须先写 `SELF_CHECK.md` 框架，不可跳过。
-- 发现问题必须修复，不能只报告不修复；修复后同步更新报告。
-- 不要重写整个项目，只修有问题的文件；不新增功能。
-- 所有资源路径用相对路径，不得出现绝对路径。
-- 纯前端项目禁止 `fetch` 加载本地 JSON，必须改为 `<script>` 加载。
-- `RUN.md` 必须包含可执行的启动命令，不得仅写「直接打开 index.html」。
-- 检查代码的工具调用控制在合理次数内，优先保证 `SELF_CHECK.md` 已写出且完整。
-- 全文使用中文，不使用 emoji。
+- `SELF_CHECK.md` MUST be produced — even if the code has no problems at all, a report must be written (a full-PASS also requires a complete record).
+- Step 1 MUST write the `SELF_CHECK.md` skeleton first; it MUST NOT be skipped.
+- Found issues MUST be fixed, not only reported; after fixing, update the report synchronously.
+- Do NOT rewrite the whole project — only fix problem files; do not add features.
+- All resource paths are relative; absolute paths are FORBIDDEN.
+- Pure frontend projects MUST NOT use `fetch` to load local JSON; MUST change to `<script>` loading.
+- `RUN.md` MUST contain executable startup commands; "just open index.html" alone is NOT allowed.
+- Keep the number of tool calls for checks within a reasonable range; prioritize ensuring `SELF_CHECK.md` is written and complete.
+- **Output language: Chinese (中文).** Although this skill instruction is in English, ALL generated project artifacts — SELF_CHECK.md content, code comments, error messages, and any other deliverable — MUST be written in Chinese. Do not use emoji.

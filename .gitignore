@@ -9,9 +9,6 @@ local_config.json
 workspaces/*
 !workspaces/.gitkeep
 
-# === 评估历史（含工作流产出引用）===
-tests/judge_history.jsonl
-
 # === Python 缓存与构建产物 ===
 __pycache__/
 *.py[cod]

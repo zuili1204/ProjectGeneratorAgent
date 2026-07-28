@@ -97,9 +97,11 @@ class Workspace:
         full.parent.mkdir(parents=True, exist_ok=True)
         tmp = full.with_suffix(full.suffix + ".tmp")
         try:
-            tmp.write_text(content, encoding="utf-8")
-            # fsync 确保落盘
-            with open(tmp, "rb") as f:
+            # 写 + flush + fsync 在同一个写句柄上完成
+            # （Windows 下 os.fsync 需要写权限句柄，只读句柄会抛 Bad file descriptor）
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+                f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, full)
         except Exception:
@@ -355,3 +357,142 @@ class Workspace:
                 return m.group(1)
 
         return "fullstack"
+
+    # === Git 集成（P3-1） ===
+    #
+    # 每个工作区可选启用 git：create_workflow 时 git init + 初始 commit，
+    # 每步完成后 commit，rerun 时新建分支。git 不可用时优雅降级（方法返回 False / 空值，
+    # 不抛异常），保证核心流程不依赖 git。
+
+    def git_has_repo(self) -> bool:
+        """工作区是否已初始化 git 仓库。"""
+        return (self.root / ".git").exists()
+
+    def _git(self, *args: str, timeout: int = 30) -> tuple[int, str, str]:
+        """执行 git 子命令，返回 (exit_code, stdout, stderr)。
+
+        在 workspace.root 下执行，设置 commit 身份为 PGA bot（避免依赖全局配置）。
+        """
+        import subprocess
+        env = dict(os.environ)
+        # 注入局部 commit 身份（不污染全局 git config）
+        env.setdefault("GIT_AUTHOR_NAME", "PGA Bot")
+        env.setdefault("GIT_AUTHOR_EMAIL", "pga-bot@local")
+        env.setdefault("GIT_COMMITTER_NAME", "PGA Bot")
+        env.setdefault("GIT_COMMITTER_EMAIL", "pga-bot@local")
+        env["GIT_TERMINAL_PROMPT"] = "0"  # 禁止交互式凭据提示
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(self.root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return (proc.returncode, proc.stdout, proc.stderr)
+        except FileNotFoundError:
+            return (127, "", "git not installed")
+        except subprocess.TimeoutExpired:
+            return (124, "", f"git {' '.join(args)} timed out ({timeout}s)")
+        except Exception as e:
+            return (1, "", str(e))
+
+    def git_init(self) -> bool:
+        """在工作区初始化 git 仓库。已存在则幂等返回 True。"""
+        if self.git_has_repo():
+            return True
+        code, _, err = self._git("init", "-q")
+        if code != 0:
+            log.warning("git init failed for %s: %s", self.workflow_id, err.strip())
+            return False
+        # 配置局部 user（双保险，即使环境变量未生效）
+        self._git("config", "user.name", "PGA Bot")
+        self._git("config", "user.email", "pga-bot@local")
+        # 默认分支名统一为 main
+        self._git("symbolic-ref", "HEAD", "refs/heads/main")
+        log.info("git init ok for workspace %s", self.workflow_id)
+        return True
+
+    def git_commit(self, message: str, allow_empty: bool = False) -> str:
+        """stage 全部变更并 commit，返回 commit hash（失败返回空串）。
+
+        Args:
+            message: commit message
+            allow_empty: 若 True，无变更也产出空 commit（用于初始化基线）
+        """
+        if not self.git_has_repo():
+            return ""
+        # stage all（含新增/删除）
+        self._git("add", "-A")
+        if not allow_empty:
+            # 无变更则跳过
+            code, out, _ = self._git("status", "--porcelain")
+            if code == 0 and not out.strip():
+                log.debug("git_commit: no changes for %s, skip", self.workflow_id)
+                return ""
+        args = ["commit", "-q", "-m", message]
+        if allow_empty:
+            args.append("--allow-empty")
+        code, out, err = self._git(*args)
+        if code != 0:
+            log.warning("git commit failed for %s: %s", self.workflow_id, err.strip())
+            return ""
+        # 取 commit hash
+        code, out, _ = self._git("rev-parse", "HEAD")
+        return out.strip() if code == 0 else ""
+
+    def git_current_branch(self) -> str:
+        """当前分支名（detached HEAD 返回短 hash）。失败返回空串。"""
+        if not self.git_has_repo():
+            return ""
+        code, out, _ = self._git("rev-parse", "--abbrev-ref", "HEAD")
+        if code == 0:
+            b = out.strip()
+            return b if b and b != "HEAD" else ""
+        return ""
+
+    def git_create_branch(self, name: str) -> bool:
+        """创建并切换到新分支。失败返回 False。"""
+        if not self.git_has_repo():
+            return False
+        # 分支名sanitize：只保留字母数字/-_
+        safe = re.sub(r"[^A-Za-z0-9_/-]", "-", name).strip("-/") or "rerun"
+        code, _, err = self._git("checkout", "-q", "-b", safe)
+        if code != 0:
+            # 分支可能已存在，尝试直接切换
+            code, _, err = self._git("checkout", "-q", safe)
+            if code != 0:
+                log.warning("git create branch %s failed: %s", safe, err.strip())
+                return False
+        log.info("git branch %s created/checked out for %s", safe, self.workflow_id)
+        return True
+
+    def git_diff(self, base: str = "", head: str = "HEAD", stat_only: bool = False) -> str:
+        """获取 diff，供 dev-review 做增量评审（P3-2）。
+
+        Args:
+            base: 基线 ref（commit hash / 分支名 / HEAD~N）。空串表示工作区未提交变更 vs head。
+            head: 目标 ref，默认 HEAD
+            stat_only: True 只返回 --stat 摘要，False 返回完整 patch
+        """
+        if not self.git_has_repo():
+            return ""
+        args = ["diff"]
+        if stat_only:
+            args.append("--stat")
+        if base:
+            args.append(f"{base}..{head}")
+        else:
+            args.append(head)
+        code, out, _ = self._git(*args)
+        return out if code == 0 else ""
+
+    def git_log_oneline(self, limit: int = 50) -> list[str]:
+        """返回 commit 历史（oneline），用于 ledger 记录 commits。"""
+        if not self.git_has_repo():
+            return []
+        code, out, _ = self._git("log", f"-{limit}", "--pretty=%h|%s", "--no-decorate")
+        if code != 0:
+            return []
+        return [line for line in out.strip().splitlines() if line]

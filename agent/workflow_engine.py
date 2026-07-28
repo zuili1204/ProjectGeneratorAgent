@@ -35,7 +35,8 @@ from .config import (
     LLMConfig, WorkflowConfig, TEMPLATES_DIR, WORKSPACES_DIR,
 )
 from .health_check import (
-    check_primary_output, check_step_companions, check_all_code_files, CheckResult,
+    check_primary_output, check_step_companions, check_all_code_files,
+    check_all_skill_outputs, check_self_check_completeness, CheckResult,
 )
 from .llm_client import LLMClient
 from .skill_loader import render_skill_prompt
@@ -198,7 +199,7 @@ def _eval_when_clause(clause: str, params: dict) -> bool:
 # === 工作流状态 ===
 
 # 状态 schema 版本，字段变更时递增，便于未来迁移
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 4
 
 # StepState 允许的状态
 # pending | running | waiting_checkpoint | completed | failed | skipped | stale
@@ -229,6 +230,10 @@ class StepState:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    # Git 集成（P3-1）：本步完成后产出的 commit hash（空表示无 git 或无变更）
+    commit_hash: str = ""
+    # 基线 commit（P3-2）：本步开始时的 HEAD，用于 dev-review 做 diff 评审的 base
+    base_commit: str = ""
 
 
 @dataclass
@@ -500,6 +505,35 @@ class WorkflowEngine:
 
         workspace.write_context_md(title, template_key, meta)
 
+        # Git 初始化（P3-1）：create_workflow 时 git init + 初始 commit，
+        # 为后续每步 commit 与 diff 评审建立基线。enable_git 关闭或 git 不可用时跳过。
+        wf_cfg = WorkflowConfig.from_dict({**asdict(self.workflow_config), **params})
+        if wf_cfg.enable_git:
+            if workspace.git_init():
+                # 写 .gitignore 排除噪声文件（日志/快照/缓存），保留 code/ 与设计文档
+                workspace.write_file(".gitignore", "\n".join([
+                    "# PGA 工作区噪声文件",
+                    "__pycache__/",
+                    "*.pyc",
+                    "*.bak",
+                    "run.log",
+                    "_failure_snapshot/",
+                    ".DS_Store",
+                    "Thumbs.db",
+                ]) + "\n")
+                init_hash = workspace.git_commit(
+                    f"init: {title} (template={template_key}, type={project_type})",
+                    allow_empty=True,
+                )
+                if init_hash:
+                    state_log_msg = f"git 基线 commit: {init_hash[:8]}"
+                else:
+                    state_log_msg = "git init 成功但初始 commit 失败"
+            else:
+                state_log_msg = "git 不可用，跳过版本控制"
+        else:
+            state_log_msg = "git 集成已关闭（enable_git=False）"
+
         state = WorkflowState(
             workflow_id=workflow_id,
             template=template_key,
@@ -515,6 +549,7 @@ class WorkflowEngine:
         )
         state.add_log("", "info", f"工作流已创建: {title}")
         state.add_log("", "info", f"模板: {template_key}, project_type: {project_type}")
+        state.add_log("", "info", state_log_msg)
         self._save_state(workspace, state)
 
         log.info("workflow created: id=%s template=%s title=%s", workflow_id, template_key, title)
@@ -642,6 +677,12 @@ class WorkflowEngine:
         step_state.status = "running"
         step_state.started_at = _now_iso()
         step_state.error_message = ""
+        # 记录本步开始时的 git HEAD（P3-2 diff 评审的 base）
+        if workspace.git_has_repo():
+            step_state.base_commit = workspace.git_current_branch() or ""
+            # 当前 HEAD hash 作为 base，便于后续 diff base..head
+            _, out, _ = workspace._git("rev-parse", "HEAD")
+            step_state.base_commit = out.strip() if out.strip() else step_state.base_commit
         self._save_state(workspace, state)
         await self._broadcast_log(
             state, workflow_id, step_def.skill_name, "info",
@@ -872,6 +913,25 @@ class WorkflowEngine:
         state.updated_at = _now_iso()
         self._write_step_summary(workspace, step_def, step_state)
         self._save_state(workspace, state)
+
+        # Git commit（P3-1）：每步完成后提交，message 含 step 名与版本
+        commit_short = ""
+        if wf_config.enable_git and workspace.git_has_repo():
+            commit_msg = (
+                f"step: {step_def.skill_name} "
+                f"(ver={step_state.skill_version or 'default'}, "
+                f"iter={step_state.iterations}, files={len(step_state.output_files)})"
+            )
+            full_hash = workspace.git_commit(commit_msg)
+            if full_hash:
+                step_state.commit_hash = full_hash
+                commit_short = full_hash[:8]
+                state.updated_at = _now_iso()
+                self._save_state(workspace, state)
+
+        # Ledger 抗压缩（P1-3）：每步追加结构化记录，rerun 时优先读 ledger
+        self._append_ledger(workspace, step_def, step_state, commit_short)
+
         await self._broadcast_log(
             state, workflow_id, step_def.skill_name, "info",
             f"步骤完成: {step_def.display_name} "
@@ -880,6 +940,7 @@ class WorkflowEngine:
             f"duration={step_state.duration_sec:.1f}s, "
             f"cost=${step_state.cost_usd:.4f}, "
             f"ver={step_state.skill_version or 'default'}, "
+            f"commit={commit_short or 'none'}, "
             f"files={len(step_state.output_files)})"
         )
 
@@ -922,6 +983,65 @@ class WorkflowEngine:
                 await self._broadcast_log(
                     state, workflow_id, step_def.skill_name, "info",
                     f"主产物检查通过: {step_def.primary_output}"
+                )
+
+        # 1b. 非主产物 outputs 检查（如 dev-design 的 DESIGN_SYSTEM.md）
+        try:
+            from .skill_loader import load_skill_meta as _load_meta
+            meta = _load_meta(step_def.skill_name)
+            all_outputs = meta.raw.get("outputs", [])
+            if isinstance(all_outputs, str):
+                all_outputs = [s.strip() for s in all_outputs.strip("[]").split(",") if s.strip()]
+            project_type = workspace.detect_project_type()
+            secondary_outputs = []
+            for out in all_outputs:
+                if out == step_def.primary_output:
+                    continue
+                if out == "DESIGN_SYSTEM.md" and project_type in ("cli", "script"):
+                    continue
+                secondary_outputs.append(out)
+            if secondary_outputs:
+                out_chk = check_all_skill_outputs(workspace, secondary_outputs)
+                if not out_chk.ok:
+                    if out_chk.missing:
+                        msg = f"产物检查失败: 缺失 {out_chk.missing}"
+                        if not hint["type"]:
+                            hint = {"type": "companions_missing", "detail": f"缺失产物: {out_chk.missing}"}
+                    else:
+                        msg = "产物检查失败: " + "; ".join(out_chk.errors)
+                        if not hint["type"]:
+                            hint = {"type": "primary_small", "detail": "; ".join(out_chk.errors)}
+                    errors.append(msg)
+                    state.add_log(step_def.skill_name, "error", msg)
+                    self._save_state(workspace, state)
+                    await self._broadcast_log(
+                        state, workflow_id, step_def.skill_name, "error", msg
+                    )
+                else:
+                    await self._broadcast_log(
+                        state, workflow_id, step_def.skill_name, "info",
+                        f"全部产物检查通过: {secondary_outputs}"
+                    )
+        except Exception:
+            pass  # skill 元数据加载失败时不阻断主流程
+
+        # 1c. dev-selfcheck 额外检查 SELF_CHECK.md 完成性（防空模板）
+        if step_def.skill_name == "dev-selfcheck":
+            sc_chk = check_self_check_completeness(workspace)
+            if not sc_chk.ok:
+                msg = "; ".join(sc_chk.errors)
+                errors.append(msg)
+                if not hint["type"]:
+                    hint = {"type": "primary_small", "detail": msg}
+                state.add_log(step_def.skill_name, "error", msg)
+                self._save_state(workspace, state)
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "error", msg
+                )
+            elif sc_chk.warnings:
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "warn",
+                    "; ".join(sc_chk.warnings)
                 )
 
         # 2. 二级文件齐全
@@ -1085,6 +1205,18 @@ class WorkflowEngine:
                     f"## ⚠️ 上轮打回反馈（请重点处理）\n{fb}"
                 )
 
+        # Ledger concerns（P1-3）：rerun 时把上轮遗留隐患注入 prompt，
+        # 让 LLM 知道上轮哪里出了问题（软截断 / 重试 / 打回），针对性修复。
+        if curr.status == "pending" and curr.retries == 0 and curr.iterations == 0:
+            # 仅在 rerun 场景（已被重置为 pending 且无运行记录）读 ledger
+            ledger_step = self._read_ledger_step(workspace, curr.skill_name)
+            if ledger_step:
+                lc = ledger_step.get("concerns", "(无)")
+                if lc and lc != "(无)":
+                    parts.append(
+                        f"## ⚠️ 上轮遗留隐患（来自 ledger，请优先解决）\n{lc}"
+                    )
+
         return "\n\n".join(parts) if parts else ""
 
     # === 步骤摘要 ===
@@ -1137,6 +1269,108 @@ class WorkflowEngine:
             return p.read_text(encoding="utf-8")
         except Exception:
             return ""
+
+    # === Ledger 抗压缩（P1-3） ===
+    #
+    # 每步完成后追加一条结构化记录到 _ledger.md，包含 step / status / commits / concerns。
+    # rerun 时优先读 ledger 重建上下文，而非从 state.json 推断或重跑扫描。
+    # Ledger 是人类可读 + 机器可解析（正则）的 markdown，不会因 state.json 损坏而丢失。
+
+    def _append_ledger(
+        self, workspace: Workspace, step_def: StepDef,
+        step_state: StepState, commit_short: str,
+    ) -> None:
+        """追加一条步骤记录到 _ledger.md。
+
+        每条记录包含：step 名 / 版本 / 状态 / 起止时间 / commit / base_commit /
+        产出文件 / 指标（iter/tokens/cost）/ concerns（健康检查或打回反馈遗留的隐患）。
+        """
+        # 提取 concerns：打回反馈 / 软截断 / 重试
+        concerns: list[str] = []
+        if step_state.soft_truncated:
+            concerns.append(f"软截断：达到迭代上限（有 {len(step_state.output_files)} 产出但未经完整验证）")
+        if step_state.retries > 0:
+            concerns.append(f"健康检查重试 {step_state.retries} 次才通过")
+        if step_state.checkpoint_response:
+            fb = step_state.checkpoint_response.get("feedback", "")
+            sev = step_state.checkpoint_response.get("severity", "")
+            if fb and not step_state.checkpoint_response.get("approved", True):
+                concerns.append(f"检查点打回（{sev or '未分级'}）: {fb[:120]}")
+        if step_state.error_message:
+            concerns.append(f"错误信息: {step_state.error_message[:120]}")
+
+        files_list = ", ".join(step_state.output_files) if step_state.output_files else "(无)"
+        concerns_text = "\n".join(f"  - {c}" for c in concerns) if concerns else "  (无)"
+
+        entry = (
+            f"\n## Step: {step_def.skill_name} (ver={step_state.skill_version or 'default'})\n"
+            f"- status: {step_state.status}\n"
+            f"- started: {step_state.started_at or '-'}\n"
+            f"- completed: {step_state.completed_at or '-'}\n"
+            f"- commit: {commit_short or 'none'}\n"
+            f"- base_commit: {step_state.base_commit or 'none'}\n"
+            f"- files: {files_list}\n"
+            f"- metrics: iter={step_state.iterations}, tokens={step_state.tokens}, "
+            f"cost=${step_state.cost_usd:.4f}, duration={step_state.duration_sec:.1f}s\n"
+            f"- concerns:\n{concerns_text}\n"
+        )
+
+        ledger_path = workspace.root / "_ledger.md"
+        try:
+            existing = ""
+            if ledger_path.exists():
+                existing = ledger_path.read_text(encoding="utf-8")
+                # 同一步重跑时，移除旧记录（整块：header + body），保留其他步骤记录。
+                # 旧版用 (?=- |$) 只删 header 行，残留 body（含旧 commit）——改为
+                # 匹配到下一个 ## Step: 或字符串末尾。
+                pattern = re.compile(
+                    r"\n## Step: " + re.escape(step_def.skill_name) + r" \(ver=.*?(?=\n## Step:|\Z)",
+                    re.DOTALL,
+                )
+                existing = pattern.sub("", existing)
+            else:
+                existing = "# Workflow Ledger\n\n每步完成后的结构化记录，rerun 时优先读取此文件重建上下文。\n"
+            ledger_path.write_text(existing + entry, encoding="utf-8")
+        except Exception:
+            log.debug("append ledger failed", exc_info=True)
+
+    def _read_ledger(self, workspace: Workspace) -> str:
+        """读取完整 ledger（供 rerun 重建上下文）。"""
+        p = workspace.root / "_ledger.md"
+        if not p.exists():
+            return ""
+        try:
+            return p.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+
+    def _read_ledger_step(self, workspace: Workspace, skill_name: str) -> dict:
+        """解析指定步骤的 ledger 记录，返回结构化 dict。
+
+        用于 rerun 时快速获取上轮该步的 commit / concerns，无需重跑扫描。
+        """
+        ledger = self._read_ledger(workspace)
+        if not ledger:
+            return {}
+        # 匹配指定 step 的块
+        pattern = re.compile(
+            r"## Step: " + re.escape(skill_name) + r" \(ver=(.*?)\)\n(.*?)(?=\n## Step:|$)",
+            re.DOTALL,
+        )
+        m = pattern.search(ledger)
+        if not m:
+            return {}
+        version = m.group(1)
+        block = m.group(2)
+        result: dict[str, Any] = {"skill_name": skill_name, "version": version}
+        for line in block.splitlines():
+            line = line.strip()
+            if line.startswith("- "):
+                kv = line[2:]
+                if ":" in kv:
+                    k, _, v = kv.partition(":")
+                    result[k.strip()] = v.strip()
+        return result
 
     # === 状态持久化 ===
 
@@ -1321,6 +1555,31 @@ class WorkflowEngine:
         s.prompt_tokens = 0
         s.completion_tokens = 0
         s.cost_usd = 0.0
+        # Git 字段重置
+        s.commit_hash = ""
+        s.base_commit = ""
+
+        # Git 分支隔离（P3-1）：rerun 新建分支，失败可回滚到原分支
+        if workspace.git_has_repo():
+            ts = _now_iso().replace(":", "-").replace("T", "-")
+            branch_name = f"rerun/{skill_name}/{ts}"
+            if workspace.git_create_branch(branch_name):
+                state.add_log(skill_name, "info", f"rerun: 已切换到分支 {branch_name}")
+            else:
+                state.add_log(skill_name, "warn", "rerun: git 分支创建失败，在原分支继续")
+
+        # Ledger 读取（P1-3）：把上轮该步的 concerns 注入日志，供 rerun 上下文参考
+        prev_ledger = self._read_ledger_step(workspace, skill_name)
+        if prev_ledger:
+            prev_concerns = prev_ledger.get("concerns", "(无)")
+            prev_commit = prev_ledger.get("commit", "none")
+            prev_ver = prev_ledger.get("version", "default")
+            state.add_log(skill_name, "info",
+                          f"rerun: 上轮 ledger 记录 ver={prev_ver}, commit={prev_commit}")
+            if prev_concerns and prev_concerns != "(无)":
+                state.add_log(skill_name, "warn",
+                              f"rerun: 上轮 concerns:\n{prev_concerns}")
+
         if latest:
             # 清空版本，_run_single_step 会重新解析到最新版本目录
             s.skill_version = ""

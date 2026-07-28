@@ -42,6 +42,10 @@ python -m agent.server
 - **任意 LLM 后端** — 兼容 DeepSeek / Qwen / Moonshot / OpenAI / 本地 vLLM 等所有 OpenAI 兼容 API
 - **两种运行形态** — CLI 单进程 + FastAPI 服务（含 WebSocket 实时日志、Token 认证、CORS 白名单）
 - **Web 前端** — 创建工作流、实时日志、文件浏览、检查点交互、设置页
+- **设计系统生成** — dev-design 产出 DESIGN_SYSTEM.md（语义化 color/typography/spacing/motion token），dev-code 落地为 tokens.css，前端组件禁止裸 hex/任意 px
+- **UI 质量门禁** — dev-selfcheck 增加前端 UI 门禁（token 纪律 / 图标纪律 / 对比度 / 触控目标 / 可访问性 / 响应式），dev-review 增加 UI 设计系统合规评审维度
+- **Git 集成** — 工作区自动 git init/commit/branch，dev-review 基于 git diff 做增量评审，rerun 在独立分支隔离
+- **多 Agent 协作** — dev-review 通过 dispatch_subagent 派发独立子代理评审，避免"自己审自己"盲区；dev-debug 四阶段科学调试
 
 ## 项目结构
 
@@ -65,24 +69,22 @@ ProjectGeneratorAgent/
 │   └── api_only.yaml          #   纯后端 API（4~5 步，无前端）
 ├── skills/                    # Skill 指令书
 │   ├── dev-requirement/       #   需求分析 → REQUIREMENT.md
-│   ├── dev-design/            #   系统设计 → DESIGN.md
-│   ├── dev-code/              #   编码实现 → code/ + RUN.md
-│   ├── dev-review/            #   代码评审 → REVIEW.md（可选）
-│   └── dev-selfcheck/         #   自测验证 → SELF_CHECK.md
-├── tests/                     # 测试与评估
-│   ├── test_smoke.py          #   冒烟测试（158 项断言）
-│   ├── regress_skill.py       #   黄金用例回归（4 个 case）
-│   ├── llm_judge.py           #   LLM-as-judge 语义评估（5 维度打分 + 趋势）
-│   └── golden/                #   黄金用例 fixture
+│   ├── dev-design/            #   系统设计 → DESIGN.md + DESIGN_SYSTEM.md（设计 token）
+│   ├── dev-code/              #   编码实现 → code/ + RUN.md（消费 token，产出 tokens.css）
+│   ├── dev-review/            #   代码评审 → REVIEW.md（可选，含 UI 合规维度）
+│   ├── dev-selfcheck/         #   自测验证 → SELF_CHECK.md（含 UI 质量门禁）
+│   ├── dev-debug/             #   系统调试 → DEBUG_REPORT.md（四阶段科学调试）
+│   └── _shared/               #   共享设计知识（非 skill，供各 skill 引用）
+│       ├── design-principles.md       #   UI 风格速查（14 种主流风格）
+│       ├── color-theory.md            #   语义 token + WCAG + 行业配色基线
+│       ├── typography-pairing.md      #   精选字体配对 + Google Fonts
+│       ├── motion-basics.md           #   动效时长/缓动/reduced-motion
+│       └── accessibility-checklist.md #   WCAG AA 核心项
 ├── web/                       # 前端界面
 │   ├── index.html             #   主页：创建工作流 + 列表
 │   ├── workflow.html          #   工作流详情：实时日志 + 文件浏览
 │   ├── settings.html          #   设置页：LLM / 服务配置
 │   └── assets/                #   CSS + JS
-├── docs/                      # 文档
-│   ├── development_guide.md   #   开发文档（架构、模块、扩展方法）
-│   ├── optimization_plan.md   #   优化方案与实施记录
-│   └── workflow_analysis.md   #   Modex-MH-Agent 工作流分析
 ├── local_config.example.json  #   配置模板（复制为 local_config.json 使用）
 ├── requirements.txt           #   Python 依赖
 └── README.md
@@ -95,10 +97,10 @@ ProjectGeneratorAgent/
 | 步骤 | Skill | 检查点 | 产出 | 条件 |
 | ---- | ----- | ------ | ---- | ---- |
 | 1 | `dev-requirement` | ✅ approve | `REQUIREMENT.md` | 必选 |
-| 2 | `dev-design` | ✅ feedback | `DESIGN.md` | 必选 |
-| 3 | `dev-code` | ✅ approve | `code/` + `RUN.md` | 必选 |
-| 4 | `dev-review` | — | `REVIEW.md` | `enable_review=true` |
-| 5 | `dev-selfcheck` | — | `SELF_CHECK.md` | 必选 |
+| 2 | `dev-design` | ✅ feedback | `DESIGN.md` + `DESIGN_SYSTEM.md` | 必选 |
+| 3 | `dev-code` | ✅ approve | `code/` + `RUN.md`（含 `tokens.css`） | 必选 |
+| 4 | `dev-review` | — | `REVIEW.md`（含 UI 合规维度） | `enable_review=true` |
+| 5 | `dev-selfcheck` | — | `SELF_CHECK.md`（含 UI 质量门禁） | 必选 |
 
 ### script_only — 纯脚本
 
@@ -204,22 +206,6 @@ python -m agent.server --host 127.0.0.1 --port 8000
 | OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
 | 本地 vLLM | `http://localhost:8000/v1` | 自定义 |
 
-## 测试与评估
-
-```bash
-# 冒烟测试（158 项，不依赖 LLM）
-python -m tests.test_smoke
-
-# 黄金用例回归 dry-run（4 个 case，验证模板/skill 可加载）
-python -m tests.regress_skill --all --dry-run
-
-# LLM-as-judge 语义评估（需已配置 API Key 且有完成的工作流）
-python -m tests.llm_judge <workflow_id> --case todo_app
-python -m tests.llm_judge --trend                    # 查看历史趋势
-```
-
-LLM-as-judge 五维度评分：需求覆盖度 / 设计一致性 / 代码质量 / 可运行性 / 文档完整度（0-10 分），结果写入 `tests/judge_history.jsonl` 供趋势分析。
-
 ## 架构要点
 
 **容错链路**：LLM 调用 → 业务层指数退避重试（`resilience.py`）→ agent_loop 无输出看门狗 + 循环检测 + 上下文压缩 → 健康检查分类补全重试 → state.json 原子写 + .bak 备份
@@ -229,6 +215,10 @@ LLM-as-judge 五维度评分：需求覆盖度 / 设计一致性 / 代码质量 
 **检查点**：结构化响应 schema（`action: approve|reject|revise` + `target_section` + `severity: blocker|major|minor|nit` + `specific_issues`），旧版 `approved` 字段自动归一化兼容。revise 反馈精准注入 CONTEXT.md。
 
 **版本化**：SKILL 支持双布局——平铺 `skills/<name>/SKILL.md`（默认）和版本目录 `skills/<name>/<version>/SKILL.md`（semver 降序排列）。`state.json` 记录每步实际版本，`rerun --latest` 升级到最新。
+
+**设计系统链路**：dev-design 产出 `DESIGN_SYSTEM.md`（语义化 color/typography/spacing/motion token + 行业反模式清单）→ dev-code 落地为 `code/frontend/src/styles/tokens.css`（+ `tailwind.config.js` 扩展），前端组件通过 `var(--*)` / Tailwind token 类消费，禁止裸 hex 与任意 px → dev-review 评审 token 合规性 → dev-selfcheck 执行 UI 质量门禁（grep 裸 hex / 对比度 / 可访问性 / 响应式）。共享设计知识沉淀在 `skills/_shared/`（curated references，非 CSV 数据库，由 LLM 内联消费）。
+
+**Git 集成**：工作区自动 `git init` + 每步产出后 `git commit`；dev-review 基于 `git diff <base>..HEAD` 做增量评审（仅审变更，非全扫）；`rerun` 在独立分支隔离，支持增量复审。`enable_git=False` 可关闭。
 
 ## 依赖
 

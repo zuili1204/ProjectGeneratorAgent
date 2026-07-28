@@ -30,9 +30,14 @@ _FRONT_MATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
 
 @dataclass
 class SkillMeta:
-    """SKILL.md 元数据（来自 YAML front matter）。"""
+    """SKILL.md 元数据（来自 YAML front matter）。
+
+    `description` 采用 superpowers 式「Use when ...」触发条件描述，
+    便于未来按语义检索 skill（而非仅靠目录名匹配）。
+    """
     name: str = ""
     version: str = ""
+    description: str = ""
     inputs: list[str] = field(default_factory=list)
     outputs: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
@@ -81,6 +86,7 @@ def _parse_front_matter(text: str) -> tuple[SkillMeta, str]:
     meta = SkillMeta(
         name=raw.get("name", ""),
         version=raw.get("version", ""),
+        description=raw.get("description", ""),
         inputs=_parse_list(raw.get("inputs", "")),
         outputs=_parse_list(raw.get("outputs", "")),
         depends_on=_parse_list(raw.get("depends_on", "")),
@@ -168,6 +174,41 @@ def resolve_skill_path(skill_name: str, version: str | None = None) -> Path:
     )
 
 
+def _load_skill_references(skill_path: Path) -> str:
+    """加载 skill 目录下的 references/*.md 和全局 _shared/*.md，拼接为补充上下文。
+
+    这些 curated reference 文件为 LLM 提供设计系统模板、行业推理表、
+    token 实现规范、UI 检查清单等结构化知识，使 SKILL.md 中的
+    "See references/xxx.md" 引用可被 LLM 实际访问。
+
+    无 references 目录时返回空串（向后兼容）。
+    """
+    parts: list[str] = []
+
+    # 1. skill 目录下的 references/*.md
+    skill_dir = skill_path.parent
+    ref_dir = skill_dir / "references"
+    if ref_dir.is_dir():
+        for ref_file in sorted(ref_dir.glob("*.md")):
+            try:
+                content = ref_file.read_text(encoding="utf-8")
+                parts.append(f"\n\n---\n# Reference: {ref_file.name}\n{content}")
+            except Exception as e:
+                log.warning("Failed to load reference %s: %s", ref_file, e)
+
+    # 2. 全局 _shared/*.md（跨 skill 共享的设计知识库）
+    shared_dir = SKILLS_DIR / "_shared"
+    if shared_dir.is_dir():
+        for shared_file in sorted(shared_dir.glob("*.md")):
+            try:
+                content = shared_file.read_text(encoding="utf-8")
+                parts.append(f"\n\n---\n# Shared Knowledge: {shared_file.name}\n{content}")
+            except Exception as e:
+                log.warning("Failed to load shared %s: %s", shared_file, e)
+
+    return "".join(parts)
+
+
 def load_skill_md(skill_name: str, version: str | None = None) -> str:
     """读取 SKILL.md 内容（明文，无加密），保留 front matter。
 
@@ -223,6 +264,12 @@ def render_skill_prompt(
 
     # 清理 slash command 引用
     md = _SLASH_CMD_RE.sub("", md)
+
+    # 拼接 skill references 与 _shared 知识库（curated design tokens、
+    # industry reasoning、UI checklist 等，使 SKILL.md 中的 "See references/"
+    # 引用可被 LLM 实际访问）
+    skill_path = resolve_skill_path(skill_name, version)
+    md += _load_skill_references(skill_path)
 
     # 拼接工作区文件清单（增强版：带大小与分类）
     if workspace_files:

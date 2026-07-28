@@ -1,112 +1,187 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>设置 — ProjectGeneratorAgent</title>
   <link rel="icon" href="/icon.png" type="image/png">
-  <link rel="stylesheet" href="/assets/css/main.css">
+  <link rel="stylesheet" href="/assets/css/main.css?v=7">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('pga_theme');
+        if (!t && window.matchMedia) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t || 'light');
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
+  <a href="#main-content" class="sr-only">跳到主要内容</a>
   <!-- 顶部导航 -->
-  <nav class="navbar">
+  <nav class="navbar" role="navigation" aria-label="主导航">
     <div class="navbar-brand">
-      <a href="/" class="btn btn-ghost btn-sm">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+      <a href="/" class="btn btn-ghost btn-sm" aria-label="返回主页">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
         返回
       </a>
-      <img src="/icon.png" alt="PGA" style="width: 28px; height: 28px; border-radius: 6px;">
+      <img src="/icon.png" alt="PGA Logo" style="width: 28px; height: 28px; border-radius: 6px;">
       <span>设置</span>
     </div>
     <div class="navbar-actions">
-      <button class="btn btn-primary btn-sm" id="save-btn">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+      <button class="btn btn-ghost btn-icon" type="button" data-theme-toggle aria-label="切换到暗色模式" title="暗色模式">
+        <svg class="icon-moon" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+        <svg class="icon-sun" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+      </button>
+      <button class="btn btn-primary btn-sm" id="save-btn" type="button">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
         保存全部
       </button>
     </div>
   </nav>
 
-  <div class="settings-container">
+  <div class="settings-container" id="main-content">
+    <!-- 服务令牌 -->
+    <div class="settings-section" id="auth-section">
+      <h2>
+        <span class="section-icon">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+        </span>
+        服务令牌
+      </h2>
+      <p>本服务启用了 Token 认证。令牌位于服务端 <code>~/.project_generator/server_token</code> 文件中，填写后才能调用 API。令牌仅保存在浏览器本地（localStorage），不会上传服务端。</p>
+      <div class="form-group">
+        <label class="form-label" for="cfg-server_token">Server Token</label>
+        <div class="input-wrap">
+          <input type="password" class="form-input" id="cfg-server_token" placeholder="粘贴服务令牌（如 B0Br...）" autocomplete="off" aria-describedby="token-status">
+          <button type="button" class="pw-toggle" data-toggle-target="cfg-server_token" aria-label="显示或隐藏服务令牌">
+            <svg class="icon-eye" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            <svg class="icon-eye-off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+          </button>
+        </div>
+      </div>
+      <div class="flex gap-2" style="align-items: center; flex-wrap: wrap;">
+        <button class="btn btn-primary btn-sm" id="save-token-btn" type="button">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+          保存令牌
+        </button>
+        <button class="btn btn-ghost btn-sm" id="clear-token-btn" type="button">清除令牌</button>
+        <span id="token-status" class="text-sm text-muted" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+
     <!-- LLM 配置 -->
     <div class="settings-section">
-      <h2>LLM 配置</h2>
+      <h2>
+        <span class="section-icon">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v1H7a3 3 0 0 0-3 3v1H3v4h1v1a3 3 0 0 0 3 3h2v1a3 3 0 0 0 6 0v-1h2a3 3 0 0 0 3-3v-1h1v-4h-1V9a3 3 0 0 0-3-3h-2V5a3 3 0 0 0-3-3z"></path></svg>
+        </span>
+        LLM 配置
+      </h2>
       <p>配置 LLM API 的访问参数，支持任意 OpenAI 兼容后端（DeepSeek / Qwen / Moonshot / OpenAI / 本地 vLLM）。</p>
 
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">API 地址 (base_url)</label>
+          <label class="form-label" for="cfg-llm_base_url">API 地址 (base_url)</label>
           <input type="text" class="form-input" id="cfg-llm_base_url" placeholder="https://api.deepseek.com/v1">
         </div>
         <div class="form-group">
-          <label class="form-label">模型名 (model)</label>
+          <label class="form-label" for="cfg-llm_model">模型名 (model)</label>
           <input type="text" class="form-input" id="cfg-llm_model" placeholder="deepseek-chat">
         </div>
       </div>
 
       <div class="form-group">
-        <label class="form-label">API Key</label>
-        <input type="password" class="form-input" id="cfg-llm_api_key" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off">
+        <label class="form-label" for="cfg-llm_api_key">API Key</label>
+        <div class="input-wrap">
+          <input type="password" class="form-input" id="cfg-llm_api_key" placeholder="sk-xxxxxxxxxxxxxxxx" autocomplete="off">
+          <button type="button" class="pw-toggle" data-toggle-target="cfg-llm_api_key" aria-label="显示或隐藏 API Key">
+            <svg class="icon-eye" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            <svg class="icon-eye-off" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+          </button>
+        </div>
       </div>
 
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">超时秒数 (timeout)</label>
+          <label class="form-label" for="cfg-llm_timeout">超时秒数 (timeout)</label>
           <input type="number" class="form-input" id="cfg-llm_timeout" placeholder="600" min="10" max="3600">
+          <div class="form-helper">单次 LLM 请求最长等待时间。</div>
         </div>
         <div class="form-group">
-          <label class="form-label">温度 (temperature)</label>
+          <label class="form-label" for="cfg-llm_temperature">温度 (temperature)</label>
           <input type="number" class="form-input" id="cfg-llm_temperature" placeholder="0.7" min="0" max="2" step="0.1">
+          <div class="form-helper">0 更稳定严谨，1+ 更有创造力。</div>
         </div>
       </div>
 
       <div class="form-group">
-        <label class="form-label">最大 tokens (max_tokens)</label>
+        <label class="form-label" for="cfg-llm_max_tokens">最大 tokens (max_tokens)</label>
         <input type="number" class="form-input" id="cfg-llm_max_tokens" placeholder="8192" min="256" max="32768">
+        <div class="form-helper">单次响应的最大生成长度，过小可能导致输出截断。</div>
       </div>
     </div>
 
     <!-- 工作流配置 -->
     <div class="settings-section">
-      <h2>工作流配置</h2>
+      <h2>
+        <span class="section-icon">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+        </span>
+        工作流配置
+      </h2>
       <p>控制工作流的执行行为，可被创建工作流时的参数覆盖。</p>
 
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Agent 最大迭代次数</label>
+          <label class="form-label" for="cfg-agent_max_iter">Agent 最大迭代次数</label>
           <input type="number" class="form-input" id="cfg-agent_max_iter" placeholder="30" min="5" max="200">
+          <div class="form-helper">单步骤内 Agent 工具调用的最大轮数，防止死循环。</div>
         </div>
         <div class="form-group">
-          <label class="form-label">检查点超时（秒）</label>
+          <label class="form-label" for="cfg-checkpoint_timeout">检查点超时（秒）</label>
           <input type="number" class="form-input" id="cfg-checkpoint_timeout" placeholder="600" min="60" max="86400">
+          <div class="form-helper">等待用户确认检查点的最长时间。</div>
         </div>
       </div>
     </div>
 
     <!-- 预设后端 -->
     <div class="settings-section">
-      <h2>常用后端预设</h2>
+      <h2>
+        <span class="section-icon">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg>
+        </span>
+        常用后端预设
+      </h2>
       <p>点击下方按钮快速填入对应后端的配置（API Key 仍需手动填写）。</p>
       <div class="flex gap-2" style="flex-wrap: wrap;">
-        <button class="btn btn-sm preset-btn" data-base="https://api.deepseek.com/v1" data-model="deepseek-chat">DeepSeek</button>
-        <button class="btn btn-sm preset-btn" data-base="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">通义千问</button>
-        <button class="btn btn-sm preset-btn" data-base="https://api.moonshot.cn/v1" data-model="moonshot-v1-32k">Moonshot</button>
-        <button class="btn btn-sm preset-btn" data-base="https://api.openai.com/v1" data-model="gpt-4o">OpenAI</button>
-        <button class="btn btn-sm preset-btn" data-base="http://localhost:8000/v1" data-model="custom">本地 vLLM</button>
+        <button class="btn btn-sm preset-btn" type="button" data-base="https://api.deepseek.com/v1" data-model="deepseek-chat">DeepSeek</button>
+        <button class="btn btn-sm preset-btn" type="button" data-base="https://dashscope.aliyuncs.com/compatible-mode/v1" data-model="qwen-plus">通义千问</button>
+        <button class="btn btn-sm preset-btn" type="button" data-base="https://api.moonshot.cn/v1" data-model="moonshot-v1-32k">Moonshot</button>
+        <button class="btn btn-sm preset-btn" type="button" data-base="https://api.openai.com/v1" data-model="gpt-4o">OpenAI</button>
+        <button class="btn btn-sm preset-btn" type="button" data-base="http://localhost:8000/v1" data-model="custom">本地 vLLM</button>
       </div>
     </div>
 
     <!-- 配置文件路径 -->
     <div class="settings-section">
-      <h2>配置文件</h2>
+      <h2>
+        <span class="section-icon">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+        </span>
+        配置文件
+      </h2>
       <p>配置持久化在用户主目录下的 JSON 文件中，也可手动编辑。</p>
       <div class="form-group">
-        <label class="form-label">配置文件路径</label>
-        <input type="text" class="form-input" id="cfg-path" readonly>
+        <label class="form-label" for="cfg-path">配置文件路径</label>
+        <input type="text" class="form-input" id="cfg-path" readonly aria-label="配置文件路径">
       </div>
     </div>
   </div>
 
-  <script src="/assets/js/api.js"></script>
-  <script src="/assets/js/settings.js"></script>
+  <script src="/assets/js/api.js?v=7"></script>
+  <script src="/assets/js/theme.js?v=7"></script>
+  <script src="/assets/js/settings.js?v=7"></script>
 </body>
 </html>
