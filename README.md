@@ -1,14 +1,11 @@
 # ProjectGeneratorAgent
 
-> 一句话生成项目的独立智能体：用户输入自然语言需求，自动产出「需求文档 + 设计文档 + 完整代码 + 自检报告」。
->
-> <br />
+> 一句话生成项目的独立智能体：输入自然语言需求，自动产出「需求文档 → 设计文档 → 完整代码 → 自检报告」全流程交付物。
 
 ## 快速开始
 
 ```bash
 # 1. 安装依赖
-cd ProjectGeneratorAgent
 pip install -r requirements.txt
 
 # 2. 配置 LLM API Key
@@ -17,139 +14,231 @@ python -m agent.cli config set llm_api_key sk-xxxxxxxxxxxxxxxx
 # 3. 一句话生成项目
 python -m agent.cli run "做一个带用户登录的待办事项 Web 应用，前后端分离"
 
-# 4. 按提示在检查点确认
-python -m agent.cli approve {workflow_id}
+# 4. 按提示在检查点确认（或加 --auto 跳过）
+python -m agent.cli approve <workflow_id>
+python -m agent.cli show <workflow_id>
 
 # 5. 查看产出
-ls workspaces/{workflow_id}/code/
+ls workspaces/<workflow_id>/code/
+```
+
+也可启动 Web 界面操作：
+
+```bash
+python -m agent.server
+# 浏览器打开 http://127.0.0.1:8000
 ```
 
 ## 主要特性
 
-- **一句话到项目**：自然语言需求 → 4 步流水线（需求分析 → 系统设计 → 编码实现 → 自测验证）
-- **工具调用驱动**：基于 LLM function calling（write\_file / read\_file / list\_files / run\_command），让模型自己决定写哪些文件
-- **检查点机制**：每步产出后可暂停等待用户审核，支持打回重做与反馈注入
-- **多层健康检查**：主产物大小 + 二级文件齐全 + 代码语法检查（Python `compile()` / JS 括号匹配 / HTML 标签闭合）
-- **工作区隔离**：每个工作流一个独立目录，状态以 `state.json` 持久化，无 DB 锁问题
-- **两种运行形态**：CLI 单进程 + FastAPI 服务（带 WebSocket 实时日志）
-- **任意 LLM 后端**：支持 DeepSeek / Qwen / Moonshot / OpenAI / 本地 vLLM 等所有 OpenAI 兼容后端
+- **一句话到项目** — 自然语言需求经 4~5 步流水线自动产出完整项目
+- **工具调用驱动** — 基于 LLM function calling（write_file / read_file / list_files / run_command），模型自主决定写哪些文件
+- **检查点机制** — 每步产出后可暂停审核，支持 approve / reject / revise（结构化打回带目标章节与严重度）
+- **多层健康检查** — 主产物大小 + 二级文件齐全 + 代码语法检查，失败按原因分类驱动补全重试
+- **重试与容错** — LLM 调用指数退避重试、无输出超时看门狗、循环检测、上下文压缩、state.json 原子写 + 备份
+- **命令沙箱** — 拦截 `rm -rf` / `format` / 外发请求等危险操作，支持 Windows 盘符保护
+- **SKILL 版本化** — 支持 `skills/<name>/<version>/SKILL.md` 目录级版本隔离，`rerun --latest` 升级
+- **USD 成本追踪** — 内置模型价目表，按步累计 prompt/completion tokens 与 USD 成本，`pga show` 展示
+- **任意 LLM 后端** — 兼容 DeepSeek / Qwen / Moonshot / OpenAI / 本地 vLLM 等所有 OpenAI 兼容 API
+- **两种运行形态** — CLI 单进程 + FastAPI 服务（含 WebSocket 实时日志、Token 认证、CORS 白名单）
+- **Web 前端** — 创建工作流、实时日志、文件浏览、检查点交互、设置页
 
 ## 项目结构
 
 ```
 ProjectGeneratorAgent/
-├── agent/                  # 核心 Python 包
-│   ├── config.py           # 配置：路径、LLMConfig、WorkflowConfig
-│   ├── llm_client.py       # OpenAI 兼容客户端
-│   ├── skill_loader.py     # SKILL.md 加载与渲染
-│   ├── workspace.py        # 工作区管理 + 上下文摘要
-│   ├── health_check.py     # 三层健康检查
-│   ├── agent_loop.py       # LLM 工具循环核心
-│   ├── workflow_engine.py  # 工作流引擎
-│   ├── cli.py              # CLI 入口（pga 命令）
-│   └── server.py           # FastAPI 服务
-├── templates/              # 工作流模板（YAML）
-│   └── grad_project.yaml   # 「一句话生成项目」模板
-├── skills/                 # Skill 指令书（明文 markdown）
-│   ├── dev-requirement/    # 需求分析
-│   ├── dev-design/         # 系统设计
-│   ├── dev-code/           # 编码实现
-│   └── dev-selfcheck/      # 自测验证
-├── workspaces/             # 工作流产出目录（运行时自动创建）
-├── docs/                   # 文档
-│   ├── workflow_analysis.md       # Modex-MH-Agent 工作流学习文档
-│   └── development_guide.md       # 开发文档（详细）
-├── requirements.txt        # Python 依赖
-└── README.md               # 本文件
+├── agent/                     # 核心 Python 包
+│   ├── config.py              #   配置：LLMConfig（含价目表）、WorkflowConfig、路径常量
+│   ├── llm_client.py          #   OpenAI 兼容客户端（流式 + tool calling）
+│   ├── resilience.py          #   重试策略：retry_async、熔断器、token 估算
+│   ├── security.py            #   命令沙箱：校验 run_command 安全性
+│   ├── skill_loader.py        #   SKILL.md 加载、渲染、版本解析（目录级版本化）
+│   ├── workspace.py           #   工作区管理、上下文摘要、原子写、备份
+│   ├── health_check.py        #   三层健康检查 + 产物契约校验
+│   ├── agent_loop.py          #   LLM 工具循环核心（看门狗/循环检测/上下文压缩）
+│   ├── workflow_engine.py     #   工作流引擎（调度/检查点/状态持久化/成本累计）
+│   ├── cli.py                 #   CLI 入口（pga 命令）
+│   └── server.py              #   FastAPI 服务（REST + WebSocket + 认证）
+├── templates/                 # 工作流模板
+│   ├── grad_project.yaml      #   全栈项目（4~5 步，含可选评审）
+│   ├── script_only.yaml       #   纯脚本（3~4 步，跳过重型设计）
+│   └── api_only.yaml          #   纯后端 API（4~5 步，无前端）
+├── skills/                    # Skill 指令书
+│   ├── dev-requirement/       #   需求分析 → REQUIREMENT.md
+│   ├── dev-design/            #   系统设计 → DESIGN.md
+│   ├── dev-code/              #   编码实现 → code/ + RUN.md
+│   ├── dev-review/            #   代码评审 → REVIEW.md（可选）
+│   └── dev-selfcheck/         #   自测验证 → SELF_CHECK.md
+├── tests/                     # 测试与评估
+│   ├── test_smoke.py          #   冒烟测试（158 项断言）
+│   ├── regress_skill.py       #   黄金用例回归（4 个 case）
+│   ├── llm_judge.py           #   LLM-as-judge 语义评估（5 维度打分 + 趋势）
+│   └── golden/                #   黄金用例 fixture
+├── web/                       # 前端界面
+│   ├── index.html             #   主页：创建工作流 + 列表
+│   ├── workflow.html          #   工作流详情：实时日志 + 文件浏览
+│   ├── settings.html          #   设置页：LLM / 服务配置
+│   └── assets/                #   CSS + JS
+├── docs/                      # 文档
+│   ├── development_guide.md   #   开发文档（架构、模块、扩展方法）
+│   ├── optimization_plan.md   #   优化方案与实施记录
+│   └── workflow_analysis.md   #   Modex-MH-Agent 工作流分析
+├── local_config.example.json  #   配置模板（复制为 local_config.json 使用）
+├── requirements.txt           #   Python 依赖
+└── README.md
 ```
 
-## 工作流
+## 工作流模板
 
-「一句话生成项目」模板定义 4 步流水线：
+### grad_project — 全栈项目
 
-| 顺序 | skill             | 中文名  | 检查点      | 产出                    |
-| -- | ----------------- | ---- | -------- | --------------------- |
-| 1  | `dev-requirement` | 需求分析 | approve  | `REQUIREMENT.md`      |
-| 2  | `dev-design`      | 系统设计 | feedback | `DESIGN.md`           |
-| 3  | `dev-code`        | 编码实现 | approve  | `code/` 目录 + `RUN.md` |
-| 4  | `dev-selfcheck`   | 自测验证 | 无        | `SELF_CHECK.md`       |
+| 步骤 | Skill | 检查点 | 产出 | 条件 |
+| ---- | ----- | ------ | ---- | ---- |
+| 1 | `dev-requirement` | ✅ approve | `REQUIREMENT.md` | 必选 |
+| 2 | `dev-design` | ✅ feedback | `DESIGN.md` | 必选 |
+| 3 | `dev-code` | ✅ approve | `code/` + `RUN.md` | 必选 |
+| 4 | `dev-review` | — | `REVIEW.md` | `enable_review=true` |
+| 5 | `dev-selfcheck` | — | `SELF_CHECK.md` | 必选 |
 
-每步完成后可暂停等待用户确认，支持：
+### script_only — 纯脚本
 
-- **通过**：继续下一步
-- **通过 + 反馈**：反馈注入上下文后继续
-- **打回**：暂停工作流，等待重跑
+需求 → 轻量设计 → 编码 → 自测，跳过重型架构设计。适用于数据清洗、定时抓取、批处理脚本。
+
+### api_only — 纯后端 API
+
+不含前端代码生成，dev-code 只产出 `backend/`。
 
 ## CLI 命令
 
-| 命令                       | 说明        |
-| ------------------------ | --------- |
-| `pga run "需求"`           | 启动工作流     |
-| `pga list`               | 列出所有工作流   |
-| `pga show <id>`          | 查看工作流详情   |
-| `pga resume <id>`        | 恢复暂停的工作流  |
-| `pga approve <id> [反馈]`  | 检查点确认通过   |
-| `pga reject <id> <反馈>`   | 检查点打回     |
-| `pga rerun <id> <skill>` | 重跑某步骤     |
-| `pga delete <id>`        | 删除工作流     |
-| `pga templates`          | 列出模板      |
-| `pga skills`             | 列出 skills |
-| `pga config set <k> <v>` | 设置配置      |
-| `pga config get [k]`     | 查看配置      |
+```
+pga run "需求"                        # 启动工作流
+  --template <key>                     #   指定模板（默认 grad_project）
+  --project-type <type>                #   项目类型：fullstack/frontend_only/backend_only/cli/script
+  --enable-review                      #   启用 dev-review 评审步骤
+  --auto                               #   自动继续（跳过检查点暂停）
+  --no-checkpoint                      #   关闭检查点
+  --max-iter <N>                       #   agent 最大迭代（默认 30）
 
-## 配置
+pga list                               # 列出所有工作流
+pga show <id>                          # 查看详情（含版本/成本/指标汇总）
+pga resume <id>                        # 恢复暂停的工作流
 
-配置优先级（从高到低）：
+pga approve <id> [反馈]                # 检查点通过
+  --no-run                             #   仅提交确认，不自动恢复
 
-1. 环境变量：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 等
-2. 用户配置文件：`~/.project_generator/config.json`（通过 `pga config set` 写入）
-3. 代码内默认值
+pga reject <id> <反馈>                 # 检查点打回
+pga revise <id> <反馈>                 # 结构化打回（带目标章节与严重度）
+  --target-section <section>           #   指定要修改的文件/章节
+  --severity <level>                   #   blocker / major / minor / nit
 
-常见 LLM 后端配置：
+pga rerun <id> <skill>                 # 重跑某步骤（后续步骤自动级联重跑）
+  --clean                              #   重跑前清理该步主产物
+  --latest                             #   升级到最新 SKILL 版本
 
-| 后端           | base\_url                                           | model             |
-| ------------ | --------------------------------------------------- | ----------------- |
-| DeepSeek（默认） | `https://api.deepseek.com/v1`                       | `deepseek-chat`   |
-| Qwen         | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`       |
-| Moonshot     | `https://api.moonshot.cn/v1`                        | `moonshot-v1-32k` |
-| OpenAI       | `https://api.openai.com/v1`                         | `gpt-4o`          |
-| 本地 vLLM      | `http://localhost:8000/v1`                          | 自定义               |
+pga delete <id>                        # 删除工作流
+pga templates                          # 列出模板
+pga skills                             # 列出 skills
+
+pga config set <key> <value>           # 设置配置
+pga config get [key]                   # 查看配置
+pga config path                        # 显示配置文件路径
+pga config list-keys                   # 列出可配置项
+```
 
 ## REST API
-
-启动服务：
 
 ```bash
 python -m agent.server --host 127.0.0.1 --port 8000
 ```
 
-主要端点：
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| POST | `/api/workflows` | 创建工作流 |
+| POST | `/api/workflows/{id}/start` | 启动工作流（后台异步） |
+| GET | `/api/workflows` | 列出工作流 |
+| GET | `/api/workflows/{id}` | 查看详情 |
+| GET | `/api/workflows/{id}/files` | 列出工作区文件 |
+| GET | `/api/workflows/{id}/files/{path}` | 读取文件内容（受保护文件拦截） |
+| GET | `/api/workflows/{id}/export` | 导出为 zip |
+| DELETE | `/api/workflows/{id}` | 删除工作流 |
+| POST | `/api/workflows/{id}/checkpoint` | 提交检查点响应（支持 approve/reject/revise） |
+| POST | `/api/workflows/{id}/rerun/{skill}?clean=&latest=` | 重跑步骤 |
+| GET | `/api/templates` | 列出模板 |
+| GET | `/api/skills` | 列出 skills |
+| GET | `/api/config` | 查看配置（API Key 脱敏） |
+| PUT | `/api/config` | 更新配置 |
+| GET | `/api/health` | 健康检查 |
+| WS | `/ws/workflows/{id}` | 实时日志推送 |
 
-| 方法   | 路径                               | 说明      |
-| ---- | -------------------------------- | ------- |
-| POST | `/api/workflows`                 | 创建工作流   |
-| POST | `/api/workflows/{id}/start`      | 启动工作流   |
-| GET  | `/api/workflows`                 | 列出工作流   |
-| GET  | `/api/workflows/{id}`            | 查看详情    |
-| POST | `/api/workflows/{id}/checkpoint` | 提交检查点响应 |
-| WS   | `/ws/workflows/{id}`             | 实时日志    |
+服务安全：Bearer Token 认证（`~/.project_generator/server_token`）、CORS 白名单（默认仅 localhost）、受保护文件拦截（state.json / project.json 等）。
 
-完整 API 文档见 [docs/development\_guide.md](docs/development_guide.md#9-rest-api-参考)。
+## 配置
 
-## 文档
+配置优先级（从高到低）：
 
-- [开发文档](docs/development_guide.md) — 架构设计、模块详解、扩展方法、部署指南
-- [工作流学习文档](docs/workflow_analysis.md) — Modex-MH-Agent 工作流分析与设计思路来源
+1. **环境变量**：`LLM_API_KEY` / `LLM_MODEL` / `LLM_BASE_URL` / `OPENAI_API_KEY` 等
+2. **用户配置文件**：`~/.project_generator/config.json`（通过 `pga config set` 写入）
+3. **项目配置降级**：`local_config.json`（项目根目录，含 API Key，已 gitignore）
+4. **代码内默认值**
+
+常用配置项：
+
+| Key | 说明 | 默认值 |
+| --- | ---- | ------ |
+| `llm_api_key` | LLM API Key | — |
+| `llm_model` | 模型名 | `deepseek-chat` |
+| `llm_base_url` | API 地址 | `https://api.deepseek.com/v1` |
+| `llm_price_input_per_1m` | 输入单价 USD/1M tokens | 自动查 MODEL_PRICING 表 |
+| `llm_price_output_per_1m` | 输出单价 USD/1M tokens | 自动查 MODEL_PRICING 表 |
+| `server_enable_auth` | 是否启用 Token 认证 | `true` |
+| `server_allowed_origins` | CORS 白名单（逗号分隔） | `http://localhost:*,http://127.0.0.1:*` |
+| `server_max_concurrent_workflows` | 并发工作流上限 | `2` |
+
+常见 LLM 后端：
+
+| 后端 | base_url | model |
+| ---- | -------- | ----- |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` |
+| Moonshot | `https://api.moonshot.cn/v1` | `moonshot-v1-32k` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| 本地 vLLM | `http://localhost:8000/v1` | 自定义 |
+
+## 测试与评估
+
+```bash
+# 冒烟测试（158 项，不依赖 LLM）
+python -m tests.test_smoke
+
+# 黄金用例回归 dry-run（4 个 case，验证模板/skill 可加载）
+python -m tests.regress_skill --all --dry-run
+
+# LLM-as-judge 语义评估（需已配置 API Key 且有完成的工作流）
+python -m tests.llm_judge <workflow_id> --case todo_app
+python -m tests.llm_judge --trend                    # 查看历史趋势
+```
+
+LLM-as-judge 五维度评分：需求覆盖度 / 设计一致性 / 代码质量 / 可运行性 / 文档完整度（0-10 分），结果写入 `tests/judge_history.jsonl` 供趋势分析。
+
+## 架构要点
+
+**容错链路**：LLM 调用 → 业务层指数退避重试（`resilience.py`）→ agent_loop 无输出看门狗 + 循环检测 + 上下文压缩 → 健康检查分类补全重试 → state.json 原子写 + .bak 备份
+
+**成本追踪**：`AgentRunResult` 分别累计 prompt/completion tokens → `StepState.cost_usd` 按 `LLMConfig.estimate_cost()` 折算 USD → `WorkflowState.computed_cost_usd` 实时汇总 → `pga show` 展示
+
+**检查点**：结构化响应 schema（`action: approve|reject|revise` + `target_section` + `severity: blocker|major|minor|nit` + `specific_issues`），旧版 `approved` 字段自动归一化兼容。revise 反馈精准注入 CONTEXT.md。
+
+**版本化**：SKILL 支持双布局——平铺 `skills/<name>/SKILL.md`（默认）和版本目录 `skills/<name>/<version>/SKILL.md`（semver 降序排列）。`state.json` 记录每步实际版本，`rerun --latest` 升级到最新。
 
 ## 依赖
 
-| 包         | 用途                                    |
-| --------- | ------------------------------------- |
-| `openai`  | LLM 客户端（OpenAI 兼容 API + tool calling） |
-| `pyyaml`  | 模板 YAML 解析                            |
-| `rich`    | CLI 美化输出（可选，未装时自动降级）                  |
-| `fastapi` | REST API 服务（可选）                       |
-| `uvicorn` | ASGI 服务器（可选）                          |
+| 包 | 用途 |
+| -- | ---- |
+| `openai>=1.30` | LLM 客户端（tool calling + 流式） |
+| `pyyaml>=6.0` | 模板 YAML 解析 |
+| `rich>=13.0` | CLI 美化输出（可选，未装时自动降级为 print） |
+| `fastapi>=0.115` | REST API 服务（可选） |
+| `uvicorn[standard]>=0.30` | ASGI 服务器（可选） |
 
 ## 许可证
 
