@@ -1,6 +1,28 @@
 # ProjectGeneratorAgent
 
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/License-Educational-green.svg)](#许可证)
+[![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-purple.svg)](https://platform.openai.com/docs/api-reference)
+
 > 一句话生成项目的独立智能体：输入自然语言需求，自动产出「需求文档 → 设计文档 → 完整代码 → 自检报告」全流程交付物。
+
+---
+
+**目录**
+
+- [快速开始](#快速开始)
+- [主要特性](#主要特性)
+- [项目结构](#项目结构)
+- [工作流模板](#工作流模板)
+- [CLI 命令](#cli-命令)
+- [REST API](#rest-api)
+- [配置](#配置)
+- [架构要点](#架构要点)
+- [依赖](#依赖)
+- [贡献指南](#贡献指南)
+- [许可证](#许可证)
+
+---
 
 ## 快速开始
 
@@ -112,7 +134,7 @@ ProjectGeneratorAgent/
 
 ## CLI 命令
 
-```
+```bash
 pga run "需求"                        # 启动工作流
   --template <key>                     #   指定模板（默认 grad_project）
   --project-type <type>                #   项目类型：fullstack/frontend_only/backend_only/cli/script
@@ -230,6 +252,25 @@ python -m agent.server --host 127.0.0.1 --port 8000
 | `fastapi>=0.115` | REST API 服务（可选） |
 | `uvicorn[standard]>=0.30` | ASGI 服务器（可选） |
 
+## 贡献指南
+
+欢迎提交 Issue 和 Pull Request。
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 提交 Pull Request
+
+**代码规范**：
+- 遵循 PEP 8 风格指南
+- 新增功能需补充文档说明
+- 确保 Python 语法检查通过
+
 ## 许可证
 
-仅供学习与研究使用。
+本项目仅供学习与研究使用。未经授权，不得用于商业用途。
+
+---
+
+**项目维护者**：[zuili1204](https://github.com/zuili1204)
