@@ -1,7 +1,7 @@
 # ProjectGeneratorAgent
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Educational-green.svg)](#许可证)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-purple.svg)](https://platform.openai.com/docs/api-reference)
 
 > 一句话生成项目的独立智能体：输入自然语言需求，自动产出「需求文档 → 设计文档 → 完整代码 → 自检报告」全流程交付物。
@@ -269,7 +269,9 @@ python -m agent.server --host 127.0.0.1 --port 8000
 
 ## 许可证
 
-本项目仅供学习与研究使用。未经授权，不得用于商业用途。
+本项目基于 [MIT License](LICENSE) 开源。
+
+Copyright (c) 2026 zuili1204
 
 ---
 
