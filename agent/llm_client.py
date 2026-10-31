@@ -133,6 +133,10 @@ class LLMClient:
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
             "stream": True,
+            # 流式响应默认不带 usage；显式要求后端在最后一个 chunk 返回用量，
+            # 否则 token / 成本统计恒为 0。不支持该参数的旧后端会在
+            # _consume_stream 中自动降级重试。
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = tools
@@ -152,17 +156,39 @@ class LLMClient:
         full_text = ""
         accumulated_tools: dict[int, dict] = {}
         finish_reason = "stop"
-        usage = {}
+        usage: dict = {}
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+        except Exception as e:
+            # 部分 OpenAI 兼容后端（旧版 vLLM / Qwen 兼容层）不认 stream_options，
+            # 命中时去掉该参数重试一次，保证可用性优先于用量统计。
+            if "stream_options" in str(e).lower() and "stream_options" in kwargs:
+                log.warning("backend rejected stream_options, retry without it: %s", e)
+                kwargs = {k: v for k, v in kwargs.items() if k != "stream_options"}
+                stream = await self._client.chat.completions.create(**kwargs)
+            else:
+                raise
+
         async for chunk in stream:
-            if not chunk.choices:
-                # 部分后端在最后一个 chunk 给 usage
-                if hasattr(chunk, "usage") and chunk.usage:
+            # usage 可能单独出现在 choices 为空的末尾 chunk，也可能挂在最后一个
+            # 有 choices 的 chunk 上；两种位置都收。
+            chunk_usage = getattr(chunk, "usage", None)
+            if chunk_usage:
+                if isinstance(chunk_usage, dict):
                     usage = {
-                        "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0),
-                        "completion_tokens": getattr(chunk.usage, "completion_tokens", 0),
+                        "prompt_tokens": chunk_usage.get("prompt_tokens", 0) or 0,
+                        "completion_tokens": chunk_usage.get("completion_tokens", 0) or 0,
+                        "total_tokens": chunk_usage.get("total_tokens", 0) or 0,
                     }
+                else:
+                    usage = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
+                    }
+
+            if not chunk.choices:
                 continue
 
             delta = chunk.choices[0].delta

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-generator-agent"
+version = "1.0.0"
+description = "一句话生成项目：需求 → 设计 → 代码 → 自检的独立智能体"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "zuili1204" }]
+keywords = ["agent", "llm", "code-generation", "workflow", "openai"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "openai>=1.30,<2.0",
+  "pyyaml>=6.0",
+  "rich>=13.0",
+  "fastapi>=0.115,<1.0",
+  "uvicorn[standard]>=0.30,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+pga = "agent.cli:main"
+pga-server = "agent.server:main"
+
+[tool.setuptools]
+packages = ["agent"]

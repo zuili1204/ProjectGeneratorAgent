@@ -1,10 +1,11 @@
 ---
 name: dev-code
-version: 1.5.0
+version: 1.5.1
 description: Use when REQUIREMENT.md and DESIGN.md exist and the project code needs to be generated — produces a complete runnable code/ tree with tests and RUN.md, executing the structured task list from DESIGN.md step by step with verification between tasks; for frontend projects also consumes DESIGN_SYSTEM.md tokens and emits tokens.css so components never hardcode raw hex/px values
 inputs: [$ARGUMENTS]
 outputs: [code/RUN.md, code/tests/]
 depends_on: [REQUIREMENT.md, DESIGN.md]
+shared: [color-theory, typography-pairing]
 optional_inputs: [DESIGN_SYSTEM.md]
 est_tokens: 10000
 est_iters: 25

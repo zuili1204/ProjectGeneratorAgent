@@ -1,10 +1,11 @@
 ---
 name: dev-requirement
-version: 1.1.0
+version: 1.1.1
 description: Use when starting a new project from a one-line user request — decomposes a single-sentence requirement into a structured REQUIREMENT.md that downstream design and coding steps consume
 inputs: [$ARGUMENTS]
 outputs: [REQUIREMENT.md]
 depends_on: []
+shared: []
 est_tokens: 4000
 est_iters: 8
 ---

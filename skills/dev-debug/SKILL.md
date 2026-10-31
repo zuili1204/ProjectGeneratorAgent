@@ -1,10 +1,11 @@
 ---
 name: dev-debug
-version: 1.1.0
+version: 1.1.1
 description: Use when dev-code or dev-selfcheck hits a repeatedly failing error and "try again" patching no longer works — runs hypothesis-driven systematic debugging (root-cause investigation, pattern analysis, hypothesis testing, implementation) and produces DEBUG_REPORT.md
 inputs: [$ARGUMENTS]
 outputs: [DEBUG_REPORT.md]
 depends_on: [code/]
+shared: []
 est_tokens: 6000
 est_iters: 20
 ---

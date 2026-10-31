@@ -16,6 +16,7 @@
   // === 状态 ===
   let ws = null;
   let wsReconnectTimer = null;
+  let wsAuthFailed = false;
   let state = null;
   let files = [];
   let activeFile = null;
@@ -518,6 +519,7 @@
 
   // === WebSocket ===
   function ensureWebSocket() {
+    if (wsAuthFailed) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     if (isFinished) return;
     try {
@@ -535,13 +537,20 @@
       handleWsEvent(data);
     };
     ws.onerror = () => setWsStatus('error');
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setWsStatus('disconnected');
+      // 1008: 服务端策略拒绝（token 缺失/错误或 Origin 不允许）
+      if (event && (event.code === 1008 || event.code === 4401)) {
+        wsAuthFailed = true;
+        toast('实时日志认证失败，请检查服务令牌', 'error');
+        return;
+      }
       if (!isFinished) scheduleReconnect();
     };
   }
 
   function scheduleReconnect() {
+    if (wsAuthFailed) return;
     if (wsReconnectTimer) return;
     wsReconnectTimer = setTimeout(() => {
       wsReconnectTimer = null;

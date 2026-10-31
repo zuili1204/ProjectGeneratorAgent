@@ -141,9 +141,10 @@ class CircuitBreaker:
 
 
 def estimate_tokens(text: str) -> int:
-    """粗略估算 token 数：中文约 1 字≈1 token，英文约 4 字符≈1 token。
+    """粗略估算 token 数（偏保守）。
 
-    综合按 3.5 字符≈1 token 估算，够用于预算守卫。
+    实际按 `len/4 + len/8`（约 2.7 字符 ≈ 1 token）估算：中文接近 1 字 1 token，
+    英文约 4 字符 1 token，混合内容取保守值，宁可早压缩也不超出上下文。
     """
     if not text:
         return 0

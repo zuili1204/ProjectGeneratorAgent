@@ -27,22 +27,25 @@
 ## 快速开始
 
 ```bash
-# 1. 安装依赖
-pip install -r requirements.txt
+# 1. 安装（editable：保证 skills/templates/web 与代码同源）
+pip install -e .
+# 或只装运行时依赖：pip install -r requirements.txt
 
 # 2. 配置 LLM API Key
-python -m agent.cli config set llm_api_key sk-xxxxxxxxxxxxxxxx
+pga config set llm_api_key sk-xxxxxxxxxxxxxxxx
 
 # 3. 一句话生成项目
-python -m agent.cli run "做一个带用户登录的待办事项 Web 应用，前后端分离"
+pga run "做一个带用户登录的待办事项 Web 应用，前后端分离"
 
 # 4. 按提示在检查点确认（或加 --auto 跳过）
-python -m agent.cli approve <workflow_id>
-python -m agent.cli show <workflow_id>
+pga approve <workflow_id>
+pga show <workflow_id>
 
 # 5. 查看产出
 ls workspaces/<workflow_id>/code/
 ```
+
+未安装为命令时，也可用 `python -m agent.cli ...` / `python -m agent.server`。
 
 也可启动 Web 界面操作：
 
@@ -56,7 +59,7 @@ python -m agent.server
 - **一句话到项目** — 自然语言需求经 4~5 步流水线自动产出完整项目
 - **工具调用驱动** — 基于 LLM function calling（write_file / read_file / list_files / run_command），模型自主决定写哪些文件
 - **检查点机制** — 每步产出后可暂停审核，支持 approve / reject / revise（结构化打回带目标章节与严重度）
-- **多层健康检查** — 主产物大小 + 二级文件齐全 + 代码语法检查，失败按原因分类驱动补全重试
+- **多层健康检查** — 主产物大小 + 二级文件齐全 + 代码语法检查 + dev-selfcheck 真实执行测试（`strict` 模式下额外做运行时验证），失败按原因分类驱动补全重试
 - **重试与容错** — LLM 调用指数退避重试、无输出超时看门狗、循环检测、上下文压缩、state.json 原子写 + 备份
 - **命令沙箱** — 拦截 `rm -rf` / `format` / 外发请求等危险操作，支持 Windows 盘符保护
 - **SKILL 版本化** — 支持 `skills/<name>/<version>/SKILL.md` 目录级版本隔离，`rerun --latest` 升级
@@ -80,6 +83,7 @@ ProjectGeneratorAgent/
 │   ├── security.py            #   命令沙箱：校验 run_command 安全性
 │   ├── skill_loader.py        #   SKILL.md 加载、渲染、版本解析（目录级版本化）
 │   ├── workspace.py           #   工作区管理、上下文摘要、原子写、备份
+│   ├── checkpoint_store.py    #   检查点落盘信号（_checkpoints/{step}.json，跨进程）
 │   ├── health_check.py        #   三层健康检查 + 产物契约校验
 │   ├── agent_loop.py          #   LLM 工具循环核心（看门狗/循环检测/上下文压缩）
 │   ├── workflow_engine.py     #   工作流引擎（调度/检查点/状态持久化/成本累计）
@@ -107,7 +111,9 @@ ProjectGeneratorAgent/
 │   ├── workflow.html          #   工作流详情：实时日志 + 文件浏览
 │   ├── settings.html          #   设置页：LLM / 服务配置
 │   └── assets/                #   CSS + JS
+├── tests/                     # pytest 单测（恢复语义 / 检查点 / usage / 验证门禁）
 ├── local_config.example.json  #   配置模板（复制为 local_config.json 使用）
+├── pyproject.toml             #   打包与 console_scripts（pga / pga-server）
 ├── requirements.txt           #   Python 依赖
 └── README.md
 ```
@@ -142,13 +148,14 @@ pga run "需求"                        # 启动工作流
   --auto                               #   自动继续（跳过检查点暂停）
   --no-checkpoint                      #   关闭检查点
   --max-iter <N>                       #   agent 最大迭代（默认 30）
+  --verification-gate <mode>           #   strict / tests（默认）/ off，dev-selfcheck 门禁
 
 pga list                               # 列出所有工作流
 pga show <id>                          # 查看详情（含版本/成本/指标汇总）
 pga resume <id>                        # 恢复暂停的工作流
 
-pga approve <id> [反馈]                # 检查点通过
-  --no-run                             #   仅提交确认，不自动恢复
+pga approve <id> [反馈]                # 检查点通过（写 _checkpoints/ 信号）
+  --no-run                             #   已废弃，兼容保留
 
 pga reject <id> <反馈>                 # 检查点打回
 pga revise <id> <反馈>                 # 结构化打回（带目标章节与严重度）
@@ -194,7 +201,7 @@ python -m agent.server --host 127.0.0.1 --port 8000
 | GET | `/api/health` | 健康检查 |
 | WS | `/ws/workflows/{id}` | 实时日志推送 |
 
-服务安全：Bearer Token 认证（`~/.project_generator/server_token`）、CORS 白名单（默认仅 localhost）、受保护文件拦截（state.json / project.json 等）。
+服务安全：Bearer Token 认证（`~/.project_generator/server_token`），覆盖工作流读取/创建/导出、检查点、重跑与配置读写；WebSocket 通过 `?token=` 传递同一 token 并校验 Origin；CORS 白名单（默认仅 localhost）；受保护文件拦截（state.json / project.json 等）。`/api/health`、`/api/templates`、`/api/skills` 为公开只读端点。
 
 ## 配置
 
@@ -204,6 +211,8 @@ python -m agent.server --host 127.0.0.1 --port 8000
 2. **用户配置文件**：`~/.project_generator/config.json`（通过 `pga config set` 写入）
 3. **项目配置降级**：`local_config.json`（项目根目录，含 API Key，已 gitignore）
 4. **代码内默认值**
+
+资源目录（`skills/` / `templates/` / `web/`）默认按「包所在目录 → 当前工作目录」查找；非 editable 安装时用 `PGA_HOME=/path/to/checkout` 指向资源目录。
 
 常用配置项：
 
@@ -234,11 +243,11 @@ python -m agent.server --host 127.0.0.1 --port 8000
 
 **成本追踪**：`AgentRunResult` 分别累计 prompt/completion tokens → `StepState.cost_usd` 按 `LLMConfig.estimate_cost()` 折算 USD → `WorkflowState.computed_cost_usd` 实时汇总 → `pga show` 展示
 
-**检查点**：结构化响应 schema（`action: approve|reject|revise` + `target_section` + `severity: blocker|major|minor|nit` + `specific_issues`），旧版 `approved` 字段自动归一化兼容。revise 反馈精准注入 CONTEXT.md。
+**检查点**：结构化响应 schema（`action: approve|reject|revise` + `target_section` + `severity: blocker|major|minor|nit` + `specific_issues`），旧版 `approved` 字段自动归一化兼容。revise 反馈精准注入 CONTEXT.md。检查点信号落盘到工作区 `_checkpoints/{step}.json`，运行中的工作流每 0.5s 轮询——`pga approve/reject/revise` 因此可以跨进程生效；进程退出后 `pga resume` 会消费已有决策（approve 直接收尾、不重跑该步），`failed` 步骤则重置为待执行并重跑，全部步骤 `completed/skipped` 才允许标记 `completed`。
 
 **版本化**：SKILL 支持双布局——平铺 `skills/<name>/SKILL.md`（默认）和版本目录 `skills/<name>/<version>/SKILL.md`（semver 降序排列）。`state.json` 记录每步实际版本，`rerun --latest` 升级到最新。
 
-**设计系统链路**：dev-design 产出 `DESIGN_SYSTEM.md`（语义化 color/typography/spacing/motion token + 行业反模式清单）→ dev-code 落地为 `code/frontend/src/styles/tokens.css`（+ `tailwind.config.js` 扩展），前端组件通过 `var(--*)` / Tailwind token 类消费，禁止裸 hex 与任意 px → dev-review 评审 token 合规性 → dev-selfcheck 执行 UI 质量门禁（grep 裸 hex / 对比度 / 可访问性 / 响应式）。共享设计知识沉淀在 `skills/_shared/`（curated references，非 CSV 数据库，由 LLM 内联消费）。
+**设计系统链路**：dev-design 产出 `DESIGN_SYSTEM.md`（语义化 color/typography/spacing/motion token + 行业反模式清单）→ dev-code 落地为 `code/frontend/src/styles/tokens.css`（+ `tailwind.config.js` 扩展），前端组件通过 `var(--*)` / Tailwind token 类消费，禁止裸 hex 与任意 px → dev-review 评审 token 合规性 → dev-selfcheck 执行 UI 质量门禁（grep 裸 hex / 对比度 / 可访问性 / 响应式）。共享设计知识沉淀在 `skills/_shared/`（curated references，非 CSV 数据库），由 SKILL.md front matter 的 `shared: [..]` 按需注入——如 dev-requirement 不加载设计知识，dev-code 只加载 color/typography，避免每个 skill 背 34KB 无关上下文。
 
 **Git 集成**：工作区自动 `git init` + 每步产出后 `git commit`；dev-review 基于 `git diff <base>..HEAD` 做增量评审（仅审变更，非全扫）；`rerun` 在独立分支隔离，支持增量复审。`enable_git=False` 可关闭。
 
@@ -252,6 +261,8 @@ python -m agent.server --host 127.0.0.1 --port 8000
 | `fastapi>=0.115` | REST API 服务（可选） |
 | `uvicorn[standard]>=0.30` | ASGI 服务器（可选） |
 
+开发与测试依赖：`pip install -e ".[dev]" && python -m pytest tests`
+
 ## 贡献指南
 
 欢迎提交 Issue 和 Pull Request。
@@ -264,7 +275,7 @@ python -m agent.server --host 127.0.0.1 --port 8000
 
 **代码规范**：
 - 遵循 PEP 8 风格指南
-- 新增功能需补充文档说明
+- 新增功能需补充文档说明与 pytest 用例（`python -m pytest tests`）
 - 确保 Python 语法检查通过
 
 ## 许可证

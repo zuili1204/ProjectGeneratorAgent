@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # 扫描时排除的文件/目录名
 _EXCLUDED_NAMES = {
     ".git", ".idea", ".vscode", "__pycache__", "node_modules",
-    ".DS_Store", "Thumbs.db",
+    ".DS_Store", "Thumbs.db", "_checkpoints", "_runtime",
 }
 
 # 扫描时排除的特定文件

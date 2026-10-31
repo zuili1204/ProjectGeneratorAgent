@@ -1,10 +1,11 @@
 ---
 name: dev-review
-version: 1.4.0
+version: 1.4.1
 description: Use when code/ has been generated and an independent review against REQUIREMENT.md and DESIGN.md is needed before self-check — produces REVIEW.md via diff-based review (git diff base..head) dispatched to an isolated subagent to avoid self-review blind spots; for frontend projects also reviews UI design-system compliance (token consistency, typography pairing, icon family, visual hierarchy, anti-patterns)
 inputs: [$ARGUMENTS]
 outputs: [REVIEW.md]
 depends_on: [REQUIREMENT.md, DESIGN.md, code/RUN.md]
+shared: [design-principles, typography-pairing, accessibility-checklist]
 optional_inputs: [DESIGN_SYSTEM.md]
 est_tokens: 4000
 est_iters: 12

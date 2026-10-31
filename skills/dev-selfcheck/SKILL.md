@@ -1,10 +1,11 @@
 ---
 name: dev-selfcheck
-version: 1.4.0
+version: 1.4.1
 description: Use when code/ and RUN.md exist and the generated project must be verified runnable before delivery — runs syntax checks, executes the test suite, validates runtime behavior, adds a UI quality gate (token discipline, contrast, accessibility, responsive) for frontend projects, fixes found issues, and produces SELF_CHECK.md with fresh verification evidence
 inputs: [$ARGUMENTS]
 outputs: [SELF_CHECK.md]
 depends_on: [code/RUN.md, REQUIREMENT.md, DESIGN.md]
+shared: [design-principles, accessibility-checklist]
 est_tokens: 5000
 est_iters: 17
 ---

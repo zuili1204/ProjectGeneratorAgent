@@ -30,6 +30,7 @@ from typing import Any, Callable, Awaitable
 
 import yaml
 
+from . import checkpoint_store
 from .agent_loop import run_agent_loop, AgentRunResult
 from .config import (
     LLMConfig, WorkflowConfig, TEMPLATES_DIR, WORKSPACES_DIR,
@@ -37,6 +38,7 @@ from .config import (
 from .health_check import (
     check_primary_output, check_step_companions, check_all_code_files,
     check_all_skill_outputs, check_self_check_completeness, CheckResult,
+    run_verification_gate, VerificationReport,
 )
 from .llm_client import LLMClient
 from .skill_loader import render_skill_prompt
@@ -288,6 +290,44 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
+def _gate_findings(
+    report: VerificationReport, strict: bool = False,
+) -> tuple[list[str], list[str]]:
+    """把验证门禁报告拆成 (阻断性错误, 警告)。
+
+    测试目录 / 测试文件 / 测试执行 始终阻断；
+    运行时验证仅在 strict 模式下阻断（uvicorn / 依赖安装受环境影响较大，
+    默认降级为警告，避免把环境问题误判为代码问题）。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def _detail(res: CheckResult) -> str:
+        return (
+            "; ".join(res.errors)
+            or "; ".join(f"缺失 {m}" for m in res.missing)
+            or "; ".join(res.warnings)
+            or "未通过"
+        )
+
+    for label, res in (
+        ("测试目录", report.test_dir_exists),
+        ("测试文件", report.test_files_exist),
+        ("测试执行", report.tests_pass),
+    ):
+        if not res.ok:
+            errors.append(f"{label}: {_detail(res)}")
+
+    if not report.runtime_ok.ok:
+        detail = _detail(report.runtime_ok)
+        if strict:
+            errors.append(f"运行时验证: {detail}")
+        else:
+            warnings.append(f"运行时验证未通过（verification_gate=tests，不阻断）: {detail}")
+
+    return errors, warnings
+
+
 # === 检查点机制 ===
 
 class CheckpointManager:
@@ -323,15 +363,32 @@ class CheckpointManager:
 _checkpoint_mgr = CheckpointManager()
 
 
-def submit_checkpoint(workflow_id: str, response: dict) -> None:
-    """提交检查点响应（供外部调用）。
+def submit_checkpoint(workflow_id: str, response: dict, step: str = "") -> None:
+    """提交检查点响应（供 CLI / 服务端调用）。
+
+    同时做两件事：
+    1. 写 `_checkpoints/{step}.json`（跨进程信号，运行中的工作流轮询读取）
+    2. 设置进程内 Event（同进程直接唤醒，省一次轮询）
 
     接受两种 schema：
     - 旧版: {approved: bool, feedback: str}
     - 新版: {action: approve|reject|revise, feedback, target_section, severity, specific_issues}
     内部统一归一化为新版存储。
+
+    Args:
+        step: 目标步骤名；为空时从 state.json 的 waiting_checkpoint 步骤推断。
     """
-    _checkpoint_mgr.set_response(workflow_id, normalize_checkpoint_response(response))
+    normalized = normalize_checkpoint_response(response)
+    workspace = Workspace(workflow_id)
+    target = step or checkpoint_store.resolve_waiting_step(workspace.root)
+    if target:
+        try:
+            checkpoint_store.write_response(workspace.root, target, normalized)
+        except OSError as e:
+            log.warning("write checkpoint response failed for %s: %s", target, e)
+    else:
+        log.warning("submit_checkpoint: 未找到 waiting_checkpoint 步骤 (workflow=%s)", workflow_id)
+    _checkpoint_mgr.set_response(workflow_id, normalized)
 
 
 # 结构化检查点响应的合法 action
@@ -385,38 +442,71 @@ def normalize_checkpoint_response(raw: dict | None) -> dict:
     }
 
 
+# 检查点轮询间隔（秒）：兼顾响应及时性与磁盘 IO
+_CHECKPOINT_POLL_INTERVAL = 0.5
+
+
 async def wait_checkpoint(
     workflow_id: str,
+    step: str,
     timeout: int,
     timeout_action: str = "auto_reject",
 ) -> dict:
-    """等待检查点响应。
+    """等待检查点响应（支持跨进程）。
+
+    先写 `_checkpoints/{step}.json`（status=waiting），随后以 0.5s 间隔轮询两个来源：
+    - 进程内 `asyncio.Event`（同进程提交时立即命中）
+    - 落盘文件 status=responded（`pga approve/reject/revise` 跨进程信号）
 
     Args:
+        step: 步骤名，用于定位检查点文件
         timeout: 超时秒数
         timeout_action: 超时动作
             - auto_approve: 超时自动通过（旧行为，不安全）
             - auto_reject: 超时自动打回（默认，更安全）
             - wait_forever: 永不超时（直到用户响应）
     """
-    if timeout_action == "wait_forever":
-        event = _checkpoint_mgr.get_event(workflow_id)
-        await event.wait()
-        return _checkpoint_mgr.get_response(workflow_id) or normalize_checkpoint_response({"approved": True})
+    workspace = Workspace(workflow_id)
+    checkpoint_store.write_request(workspace.root, step, timeout_action)
 
-    event = _checkpoint_mgr.get_event(workflow_id)
-    try:
-        await asyncio.wait_for(event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        log.warning("checkpoint %s timed out after %ds, action=%s",
-                    workflow_id, timeout, timeout_action)
-        if timeout_action == "auto_approve":
-            return normalize_checkpoint_response({"approved": True, "auto": True})
-        # auto_reject
-        return normalize_checkpoint_response(
-            {"approved": False, "feedback": "检查点超时未响应，自动打回", "auto": True}
-        )
-    return _checkpoint_mgr.get_response(workflow_id) or normalize_checkpoint_response({"approved": True})
+    deadline = None
+    if timeout_action != "wait_forever":
+        deadline = time.monotonic() + max(0, timeout)
+
+    while True:
+        # 1) 进程内信号
+        resp = _checkpoint_mgr.get_response(workflow_id)
+        if resp:
+            checkpoint_store.mark_consumed(workspace.root, step, resp)
+            return resp
+
+        # 2) 落盘信号（跨进程）
+        data = checkpoint_store.read(workspace.root, step)
+        if data and data.get("status") == "responded":
+            resp = normalize_checkpoint_response(data)
+            checkpoint_store.mark_consumed(workspace.root, step, resp)
+            log.info(
+                "checkpoint %s/%s got file response: action=%s",
+                workflow_id, step, resp.get("action"),
+            )
+            return resp
+
+        # 3) 超时判定
+        if deadline is not None and time.monotonic() >= deadline:
+            log.warning(
+                "checkpoint %s/%s timed out after %ds, action=%s",
+                workflow_id, step, timeout, timeout_action,
+            )
+            if timeout_action == "auto_approve":
+                resp = normalize_checkpoint_response({"approved": True, "auto": True})
+            else:
+                resp = normalize_checkpoint_response(
+                    {"approved": False, "feedback": "检查点超时未响应，自动打回", "auto": True}
+                )
+            checkpoint_store.mark_timeout(workspace.root, step, resp)
+            return resp
+
+        await asyncio.sleep(_CHECKPOINT_POLL_INTERVAL)
 
 
 # === 日志广播 ===
@@ -518,6 +608,13 @@ class WorkflowEngine:
                     "*.bak",
                     "run.log",
                     "_failure_snapshot/",
+                    "_checkpoints/",
+                    "_runtime/",
+                    "node_modules/",
+                    ".venv/",
+                    "venv/",
+                    "dist/",
+                    "build/",
                     ".DS_Store",
                     "Thumbs.db",
                 ]) + "\n")
@@ -561,6 +658,8 @@ class WorkflowEngine:
         """运行工作流（异步，支持暂停/恢复）。
 
         全局超时由 workflow_config.global_timeout 控制。
+        运行期间每 10s 写一次 `_runtime/heartbeat`，供服务端启动时的僵尸
+        检测区分「真僵尸」与「另一个进程正在跑」。
         """
         workspace = Workspace(workflow_id)
         state = self._load_state(workspace)
@@ -571,6 +670,7 @@ class WorkflowEngine:
 
         wf_config = WorkflowConfig.from_dict({**asdict(self.workflow_config), **state.params})
 
+        heartbeat = asyncio.create_task(self._heartbeat_loop(workspace))
         try:
             return await asyncio.wait_for(
                 self._run_workflow_impl(workspace, state, tmpl, wf_config, workflow_id),
@@ -583,17 +683,60 @@ class WorkflowEngine:
             state.add_log("", "error", f"工作流全局超时（{wf_config.global_timeout}s）")
             self._save_state(workspace, state)
             return state
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                (workspace.root / "_runtime" / "heartbeat").unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def _heartbeat_loop(self, workspace: Workspace) -> None:
+        """每 10s 刷新心跳文件（异常静默，不影响主流程）。"""
+        path = workspace.root / "_runtime" / "heartbeat"
+        while True:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(_now_iso(), encoding="utf-8")
+            except OSError:
+                log.debug("write heartbeat failed", exc_info=True)
+            await asyncio.sleep(10)
 
     async def _run_workflow_impl(
         self, workspace: Workspace, state: WorkflowState, tmpl: TemplateDef,
         wf_config: WorkflowConfig, workflow_id: str,
     ) -> WorkflowState:
+        # 恢复语义：failed 步骤代表「上一轮失败/被打回」，恢复时必须重跑，
+        # 否则下面的循环会把它当作已处理而跳过，最终误判为 completed。
+        reset_failed = [s.skill_name for s in state.steps if s.status == "failed"]
+        for s in state.steps:
+            if s.status == "failed":
+                s.status = "pending"
+                s.error_message = ""
+                # 检查点反馈保留在 checkpoint_response 中，供 _build_extra_context 回填
+
         state.status = "running"
         state.updated_at = _now_iso()
         self._save_state(workspace, state)
         await self._broadcast_log(state, workflow_id, "", "info", "工作流开始执行")
+        if reset_failed:
+            await self._broadcast_log(
+                state, workflow_id, "", "info",
+                f"恢复工作流：{', '.join(reset_failed)} 重置为待执行并重跑"
+            )
 
         try:
+            # 进程在等待检查点时退出：恢复时先消费落盘决策（不重跑该步）
+            if any(s.status == "waiting_checkpoint" for s in state.steps):
+                await self._resume_waiting_checkpoints(
+                    workspace, state, tmpl, wf_config, workflow_id
+                )
+                if state.status in ("paused", "failed"):
+                    return state
+
             for idx, step_def in enumerate(tmpl.sub_steps):
                 step_state = state.steps[idx]
 
@@ -603,9 +746,12 @@ class WorkflowEngine:
                 # stale 当作 pending 处理（rerun 级联失效）
                 if step_state.status == "stale":
                     step_state.status = "pending"
-                # failed 步骤不自动跳过
+                # 仍有 failed（理论上归一化后不会出现）：保留失败状态，禁止误判完成
                 if step_state.status == "failed":
-                    break
+                    state.status = "failed"
+                    state.updated_at = _now_iso()
+                    self._save_state(workspace, state)
+                    return state
 
                 # 条件分支：when 不满足则跳过该步
                 if step_def.when and not _eval_when(step_def.when, state.params):
@@ -646,6 +792,27 @@ class WorkflowEngine:
                 if state.status == "paused":
                     return state
 
+            # 完成校验：必须所有步骤都是 completed / skipped，
+            # 避免 failed/pending 被「循环结束」误判为成功。
+            unfinished = [
+                s.skill_name for s in state.steps
+                if s.status not in ("completed", "skipped")
+            ]
+            if unfinished:
+                state.status = "failed"
+                state.current_step = ""
+                state.updated_at = _now_iso()
+                state.add_log(
+                    "", "error",
+                    f"工作流未真正完成，以下步骤未完成: {', '.join(unfinished)}"
+                )
+                self._save_state(workspace, state)
+                await self._broadcast_log(
+                    state, workflow_id, "", "error",
+                    f"工作流未完成: {', '.join(unfinished)}"
+                )
+                return state
+
             # 全部完成
             state.status = "completed"
             state.current_step = ""
@@ -677,6 +844,8 @@ class WorkflowEngine:
         step_state.status = "running"
         step_state.started_at = _now_iso()
         step_state.error_message = ""
+        # 本步重新执行：清理上一轮检查点信号（reject 反馈已存 checkpoint_response）
+        checkpoint_store.clear(workspace.root, step_def.skill_name)
         # 记录本步开始时的 git HEAD（P3-2 diff 评审的 base）
         if workspace.git_has_repo():
             step_state.base_commit = workspace.git_current_branch() or ""
@@ -807,7 +976,7 @@ class WorkflowEngine:
 
             # 健康检查
             health_ok, health_error, _ = await self._run_health_checks(
-                workspace, state, workflow_id, step_def
+                workspace, state, workflow_id, step_def, wf_config
             )
             if health_ok:
                 break
@@ -846,68 +1015,109 @@ class WorkflowEngine:
 
             response = await wait_checkpoint(
                 workflow_id,
+                step_def.skill_name,
                 timeout=wf_config.checkpoint_timeout,
                 timeout_action=wf_config.checkpoint_timeout_action,
             )
             step_state.checkpoint_response = response
-            _checkpoint_mgr.clear(workflow_id)
 
-            action = response.get("action", "approve")
-            feedback = response.get("feedback", "")
-            target_section = response.get("target_section", "")
-            severity = response.get("severity", "")
-            specific_issues = response.get("specific_issues", [])
-
-            # reject / revise 都打回（暂停工作流），区别在反馈粒度
-            if action in ("reject", "revise"):
-                # 拼接结构化反馈：总体反馈 + 目标章节 + 严重度 + 具体问题清单
-                structured = []
-                if feedback:
-                    structured.append(feedback)
-                if target_section:
-                    structured.append(f"目标章节/文件: {target_section}")
-                if severity:
-                    structured.append(f"严重度: {severity}")
-                if specific_issues:
-                    structured.append("具体问题:")
-                    for issue in specific_issues:
-                        loc = issue.get("file", "")
-                        if issue.get("line"):
-                            loc += f":{issue['line']}"
-                        structured.append(
-                            f"  - [{loc}] {issue.get('issue', '')}"
-                            f" → 建议: {issue.get('suggestion', '')}"
-                        )
-                full_feedback = "\n".join(structured) or feedback
-
-                step_state.status = "failed"
-                step_state.error_message = f"用户{action}（{severity or '未分级'}）: {feedback[:200]}"
-                state.status = "paused"
-                state.updated_at = _now_iso()
-                if full_feedback:
-                    workspace.inject_once(
-                        f"{action}反馈 - {step_def.skill_name}",
-                        full_feedback,
-                    )
-                self._save_state(workspace, state)
-                await self._broadcast_log(
-                    state, workflow_id, step_def.skill_name, "warn",
-                    f"用户{action}: {full_feedback[:200]}"
-                )
+            approved = await self._apply_checkpoint_response(
+                workspace, state, workflow_id, step_def, step_state, response
+            )
+            if not approved:
                 return
 
-            # approve：用户反馈注入 CONTEXT.md
-            if feedback.strip():
-                workspace.inject_once(
-                    f"用户反馈 - {step_def.skill_name}",
-                    feedback,
-                )
-                await self._broadcast_log(
-                    state, workflow_id, step_def.skill_name, "info",
-                    f"用户反馈已注入: {feedback[:100]}"
-                )
+        await self._finalize_step(
+            workspace, state, step_def, step_state, wf_config, workflow_id
+        )
 
-        # 步骤完成：写结构化摘要供下一步引用
+    async def _apply_checkpoint_response(
+        self,
+        workspace: Workspace,
+        state: WorkflowState,
+        workflow_id: str,
+        step_def: StepDef,
+        step_state: StepState,
+        response: dict,
+    ) -> bool:
+        """应用检查点决策。
+
+        Returns:
+            True  —— 放行（approve），调用方继续收尾/下一步
+            False —— 打回（reject/revise），已把步骤置 failed、工作流置 paused
+        """
+        _checkpoint_mgr.clear(workflow_id)
+
+        action = response.get("action", "approve")
+        feedback = response.get("feedback", "")
+        target_section = response.get("target_section", "")
+        severity = response.get("severity", "")
+        specific_issues = response.get("specific_issues", [])
+
+        # reject / revise 都打回（暂停工作流），区别在反馈粒度
+        if action in ("reject", "revise"):
+            # 拼接结构化反馈：总体反馈 + 目标章节 + 严重度 + 具体问题清单
+            structured = []
+            if feedback:
+                structured.append(feedback)
+            if target_section:
+                structured.append(f"目标章节/文件: {target_section}")
+            if severity:
+                structured.append(f"严重度: {severity}")
+            if specific_issues:
+                structured.append("具体问题:")
+                for issue in specific_issues:
+                    loc = issue.get("file", "")
+                    if issue.get("line"):
+                        loc += f":{issue['line']}"
+                    structured.append(
+                        f"  - [{loc}] {issue.get('issue', '')}"
+                        f" → 建议: {issue.get('suggestion', '')}"
+                    )
+            full_feedback = "\n".join(structured) or feedback
+
+            step_state.status = "failed"
+            step_state.error_message = f"用户{action}（{severity or '未分级'}）: {feedback[:200]}"
+            state.status = "paused"
+            state.updated_at = _now_iso()
+            if full_feedback:
+                workspace.inject_once(
+                    f"{action}反馈 - {step_def.skill_name}",
+                    full_feedback,
+                )
+            self._save_state(workspace, state)
+            await self._broadcast_log(
+                state, workflow_id, step_def.skill_name, "warn",
+                f"用户{action}: {full_feedback[:200]}"
+            )
+            return False
+
+        # approve：用户反馈注入 CONTEXT.md
+        if feedback.strip():
+            workspace.inject_once(
+                f"用户反馈 - {step_def.skill_name}",
+                feedback,
+            )
+            await self._broadcast_log(
+                state, workflow_id, step_def.skill_name, "info",
+                f"用户反馈已注入: {feedback[:100]}"
+            )
+        return True
+
+    async def _finalize_step(
+        self,
+        workspace: Workspace,
+        state: WorkflowState,
+        step_def: StepDef,
+        step_state: StepState,
+        wf_config: WorkflowConfig,
+        workflow_id: str,
+    ) -> None:
+        """步骤收尾：写摘要 → 存状态 → git commit → ledger → 广播。
+
+        抽成独立方法，供「正常执行完成」与「恢复时消费已存在的检查点决策」
+        两条路径共用，避免恢复路径漏掉 commit / ledger。
+        """
         step_state.status = "completed"
         step_state.completed_at = _now_iso()
         state.updated_at = _now_iso()
@@ -944,6 +1154,67 @@ class WorkflowEngine:
             f"files={len(step_state.output_files)})"
         )
 
+    async def _resume_waiting_checkpoints(
+        self,
+        workspace: Workspace,
+        state: WorkflowState,
+        tmpl: TemplateDef,
+        wf_config: WorkflowConfig,
+        workflow_id: str,
+    ) -> None:
+        """恢复「进程退出时正在等待检查点」的步骤。
+
+        优先消费 `_checkpoints/{step}.json` 里已落盘的决策：
+        - approve → 直接收尾（不重跑该步，避免重复消耗 token）
+        - reject/revise → 打回并暂停（反馈已在文件中）
+        - 无决策 → 继续等待，而不是把该步重跑一遍
+        """
+        for idx, step_state in enumerate(state.steps):
+            if step_state.status != "waiting_checkpoint":
+                continue
+            step_def = tmpl.sub_steps[idx]
+            decision = checkpoint_store.read(workspace.root, step_def.skill_name) or {}
+
+            if decision.get("status") == "responded":
+                response = normalize_checkpoint_response(decision)
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "info",
+                    f"恢复：读取到检查点决策 action={response.get('action')}，不重跑该步"
+                )
+            else:
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "info",
+                    "恢复：未发现检查点决策，继续等待确认"
+                )
+                response = await wait_checkpoint(
+                    workflow_id,
+                    step_def.skill_name,
+                    timeout=wf_config.checkpoint_timeout,
+                    timeout_action=wf_config.checkpoint_timeout_action,
+                )
+
+            step_state.checkpoint_response = response
+            approved = await self._apply_checkpoint_response(
+                workspace, state, workflow_id, step_def, step_state, response
+            )
+            if not approved:
+                # resume 的语义是「继续」：打回反馈已注入 CONTEXT.md，
+                # 这里直接把步骤重置为待重跑，避免用户还要再 resume 一次。
+                step_state.status = "pending"
+                step_state.error_message = ""
+                state.status = "running"
+                state.updated_at = _now_iso()
+                self._save_state(workspace, state)
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "info",
+                    "恢复：按打回反馈重跑该步骤"
+                )
+                continue
+
+            await self._finalize_step(
+                workspace, state, step_def, step_state, wf_config, workflow_id
+            )
+
     # === 健康检查 ===
 
     async def _run_health_checks(
@@ -952,6 +1223,7 @@ class WorkflowEngine:
         state: WorkflowState,
         workflow_id: str,
         step_def: StepDef,
+        wf_config: WorkflowConfig | None = None,
     ) -> tuple[bool, str, dict]:
         """对当前步骤产出做健康检查。返回 (是否通过, 错误信息, 分类提示)。
 
@@ -1088,6 +1360,56 @@ class WorkflowEngine:
                     if not hint["type"] or hint["type"] == "":
                         hint = {"type": "syntax_error", "detail": msg}
 
+        # 4. dev-selfcheck：真实执行验证门禁（测试目录 / 测试文件 / 测试通过 / 运行时）
+        if step_def.skill_name == "dev-selfcheck" and wf_config is not None:
+            gate_mode = getattr(wf_config, "verification_gate", "tests")
+            if gate_mode != "off":
+                project_type = workspace.detect_project_type()
+                report: VerificationReport | None = None
+                try:
+                    # 默认（tests）只跑测试，不启动生成的项目——避免执行
+                    # 生成脚本/后端带来副作用；strict 模式才做运行时验证。
+                    report = await run_verification_gate(
+                        workspace, project_type,
+                        skip_runtime=(gate_mode != "strict"),
+                    )
+                except Exception as e:
+                    msg = f"验证门禁执行异常: {e}"
+                    errors.append(msg)
+                    if not hint["type"]:
+                        hint = {"type": "verification_failed", "detail": msg}
+                    state.add_log(step_def.skill_name, "error", msg)
+                    self._save_state(workspace, state)
+                    await self._broadcast_log(
+                        state, workflow_id, step_def.skill_name, "error", msg
+                    )
+
+                if report is not None:
+                    gate_errors, gate_warnings = _gate_findings(
+                        report, strict=(gate_mode == "strict")
+                    )
+                    for w in gate_warnings:
+                        state.add_log(step_def.skill_name, "warn", w)
+                        await self._broadcast_log(
+                            state, workflow_id, step_def.skill_name, "warn", w
+                        )
+                    if gate_errors:
+                        msg = "验证门禁失败:\n" + "\n".join(gate_errors)
+                        errors.append(msg)
+                        if not hint["type"]:
+                            hint = {"type": "verification_failed", "detail": msg}
+                        state.add_log(step_def.skill_name, "error", msg)
+                        self._save_state(workspace, state)
+                        await self._broadcast_log(
+                            state, workflow_id, step_def.skill_name, "error", msg
+                        )
+                    else:
+                        self._save_state(workspace, state)
+                        await self._broadcast_log(
+                            state, workflow_id, step_def.skill_name, "info",
+                            f"验证门禁通过: {report.summary}"
+                        )
+
         return (len(errors) == 0, "\n".join(errors), hint)
 
     def _build_retry_prompt(
@@ -1132,6 +1454,16 @@ class WorkflowEngine:
                 "用 write_file 覆盖写入修复后的完整文件\n"
                 "2. **只修有问题的文件**，不要重写整个项目\n"
                 "3. 修复完所有报错后立即结束\n"
+            )
+        elif "验证门禁失败" in health_error or "验证门禁执行异常" in health_error:
+            base += (
+                "### 要求\n"
+                "1. 测试必须真实通过：用 run_command 执行 pytest / npm test，"
+                "并在 SELF_CHECK.md 中贴出 exit_code: 0 的证据\n"
+                "2. 缺少测试目录或测试文件时，补写 test_*.py / *.test.js（不要留空壳测试）\n"
+                "3. 测试失败时修代码或修测试，**禁止删除断言、跳过用例、伪造通过输出**\n"
+                "4. 运行时验证失败（strict 模式）时修启动入口/依赖，然后重新执行验证命令\n"
+                "5. 完成后立即结束，不要重写整个项目\n"
             )
         else:
             base += (
@@ -1558,6 +1890,12 @@ class WorkflowEngine:
         # Git 字段重置
         s.commit_hash = ""
         s.base_commit = ""
+
+        # 清理检查点信号：目标步骤及后续 stale 步骤会重新执行，
+        # 旧决策（approve/reject）不能再次生效。
+        _checkpoint_mgr.clear(workflow_id)
+        for j in range(target_idx, len(state.steps)):
+            checkpoint_store.clear(workspace.root, state.steps[j].skill_name)
 
         # Git 分支隔离（P3-1）：rerun 新建分支，失败可回滚到原分支
         if workspace.git_has_repo():

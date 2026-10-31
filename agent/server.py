@@ -31,6 +31,7 @@ import fnmatch
 import json
 import logging
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from .workflow_engine import (
     submit_checkpoint, set_broadcast, unsubscribe_broadcast,
 )
 from .skill_loader import list_skills
+from .workspace import Workspace
 
 # Web 前端目录
 WEB_DIR = PROJECT_ROOT / "web"
@@ -183,13 +185,22 @@ def _detect_zombie_workflows() -> list[str]:
         except Exception:
             continue
         if state.status == "running":
-            # 没有任何活的后台任务持有它 → 僵尸
+            # 没有任何活的后台任务持有它 → 可能僵尸。
+            # 但必须先看心跳：CLI 进程可能在另一个终端里正常跑着，
+            # 直接标 interrupted 会把活任务误判为僵尸。
             if state.workflow_id not in _running_tasks:
+                hb = d / "_runtime" / "heartbeat"
+                if hb.exists():
+                    try:
+                        if time.time() - hb.stat().st_mtime < 120:
+                            continue  # 心跳新鲜，另一个进程仍在运行
+                    except OSError:
+                        pass
                 state.status = "interrupted"
                 state.add_log("", "warn", "服务重启检测到僵尸状态，已标记为 interrupted（可 resume 或 delete）")
                 state.updated_at = _now_iso_for_server()
                 try:
-                    WorkflowEngine()._save_state(Workflow(state.workflow_id), state)
+                    WorkflowEngine()._save_state(Workspace(state.workflow_id), state)
                     zombies.append(state.workflow_id)
                 except Exception as e:
                     log.warning("failed to mark zombie %s: %s", state.workflow_id, e)
@@ -213,6 +224,7 @@ class CreateWorkflowRequest(BaseModel):
     auto_proceed: bool = Field(False, description="自动继续")
     enable_checkpoints: bool = Field(True, description="开启检查点")
     enable_review: bool = Field(False, description="启用 dev-review 评审步骤（需模板支持）")
+    verification_gate: str = Field("tests", description="dev-selfcheck 验证门禁: strict/tests/off")
     max_iter: int = Field(50, description="agent 最大迭代次数")
 
 
@@ -328,6 +340,7 @@ def create_app() -> FastAPI:
             "enable_checkpoints": req.enable_checkpoints,
             "auto_proceed": req.auto_proceed,
             "project_type": req.project_type,
+            "verification_gate": req.verification_gate,
         })
         engine = WorkflowEngine(llm_config=llm_config, workflow_config=wf_config)
         workflow_id = engine.create_workflow(
@@ -341,6 +354,7 @@ def create_app() -> FastAPI:
                 "enable_checkpoints": req.enable_checkpoints,
                 "auto_proceed": req.auto_proceed,
                 "enable_review": req.enable_review,
+                "verification_gate": req.verification_gate,
             },
         )
         return {
@@ -367,13 +381,13 @@ def create_app() -> FastAPI:
         return {"workflow_id": workflow_id, "status": "running"}
 
     @app.get("/api/workflows")
-    async def list_workflows() -> dict:
+    async def list_workflows(_: None = Depends(_require_auth)) -> dict:
         """列出所有工作流。"""
         engine = WorkflowEngine()
         return {"workflows": engine.list_workflows()}
 
     @app.get("/api/workflows/{workflow_id}")
-    async def get_workflow(workflow_id: str) -> dict:
+    async def get_workflow(workflow_id: str, _: None = Depends(_require_auth)) -> dict:
         """查看工作流详情。"""
         engine = WorkflowEngine()
         state = engine.get_state(workflow_id)
@@ -382,7 +396,7 @@ def create_app() -> FastAPI:
         return json.loads(state.to_json())
 
     @app.get("/api/workflows/{workflow_id}/files")
-    async def list_workflow_files(workflow_id: str) -> dict:
+    async def list_workflow_files(workflow_id: str, _: None = Depends(_require_auth)) -> dict:
         """列出工作流工作区的文件。"""
         from .workspace import Workspace
         ws = Workspace(workflow_id)
@@ -433,7 +447,7 @@ def create_app() -> FastAPI:
         return {"deleted": workflow_id}
 
     @app.get("/api/workflows/{workflow_id}/export")
-    async def export_workflow(workflow_id: str):
+    async def export_workflow(workflow_id: str, _: None = Depends(_require_auth)):
         """导出工作区所有文件为 zip。"""
         import io
         import zipfile
@@ -469,8 +483,10 @@ def create_app() -> FastAPI:
         if not state:
             raise HTTPException(status_code=404, detail=f"工作流不存在: {workflow_id}")
 
-        waiting = any(s.status == "waiting_checkpoint" for s in state.steps)
-        if not waiting:
+        waiting_step = next(
+            (s.skill_name for s in state.steps if s.status == "waiting_checkpoint"), ""
+        )
+        if not waiting_step:
             raise HTTPException(status_code=400, detail="工作流当前不在等待检查点")
 
         # 构造提交载荷：新版 action 优先，回退旧版 approved
@@ -489,7 +505,7 @@ def create_app() -> FastAPI:
             payload = {"approved": approved, "feedback": req.feedback}
             is_approve = approved
 
-        submit_checkpoint(workflow_id, payload)
+        submit_checkpoint(workflow_id, payload, step=waiting_step)
 
         # 自动恢复（仅当 approve 且 run=true）
         if is_approve and req.run:
@@ -571,7 +587,7 @@ def create_app() -> FastAPI:
     # === 配置 ===
 
     @app.get("/api/config")
-    async def get_config() -> dict:
+    async def get_config(_: None = Depends(_require_auth)) -> dict:
         """查看配置（API Key 会脱敏）。"""
         cfg = _load_user_config()
         safe = {}
@@ -599,7 +615,20 @@ def create_app() -> FastAPI:
 
         连接关闭时主动 unsubscribe，避免回调泄漏导致已关闭 WS 仍被广播
         触发（旧实现 finally 里 pass，长期运行会堆积死回调）。
+
+        认证：浏览器 WebSocket 无法设置 Authorization 头，token 通过
+        `?token=` 查询参数传递；同时校验 Origin，避免任意网页连上本地服务。
         """
+        origin = websocket.headers.get("origin", "")
+        if origin and not _origin_allowed(origin, allowed_patterns):
+            log.warning("WebSocket rejected: origin %s not allowed", origin)
+            await websocket.close(code=1008)
+            return
+        if _SERVER_TOKEN and websocket.query_params.get("token", "") != _SERVER_TOKEN:
+            log.warning("WebSocket rejected: missing/invalid token (workflow=%s)", workflow_id)
+            await websocket.close(code=1008)
+            return
+
         await websocket.accept()
         log.info("WebSocket connected: workflow_id=%s", workflow_id)
 

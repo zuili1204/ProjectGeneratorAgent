@@ -41,6 +41,8 @@ class SkillMeta:
     inputs: list[str] = field(default_factory=list)
     outputs: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
+    # 需要注入的 skills/_shared/*.md（按需声明，未声明则不注入）
+    shared: list[str] = field(default_factory=list)
     est_tokens: int = 0
     est_iters: int = 0
     raw: dict = field(default_factory=dict)
@@ -90,6 +92,7 @@ def _parse_front_matter(text: str) -> tuple[SkillMeta, str]:
         inputs=_parse_list(raw.get("inputs", "")),
         outputs=_parse_list(raw.get("outputs", "")),
         depends_on=_parse_list(raw.get("depends_on", "")),
+        shared=_parse_list(raw.get("shared", "")),
         est_tokens=int(raw["est_tokens"]) if raw.get("est_tokens", "").isdigit() else 0,
         est_iters=int(raw["est_iters"]) if raw.get("est_iters", "").isdigit() else 0,
         raw=raw,
@@ -174,14 +177,15 @@ def resolve_skill_path(skill_name: str, version: str | None = None) -> Path:
     )
 
 
-def _load_skill_references(skill_path: Path) -> str:
-    """加载 skill 目录下的 references/*.md 和全局 _shared/*.md，拼接为补充上下文。
+def _load_skill_references(skill_path: Path, shared: list[str] | None = None) -> str:
+    """加载 skill 目录下的 references/*.md 与按需声明的 _shared/*.md。
 
-    这些 curated reference 文件为 LLM 提供设计系统模板、行业推理表、
-    token 实现规范、UI 检查清单等结构化知识，使 SKILL.md 中的
-    "See references/xxx.md" 引用可被 LLM 实际访问。
+    `_shared` 不再全量注入：SKILL.md front matter 用 `shared: [a, b]` 显式声明
+    需要哪些共享知识（如 dev-requirement 不需要前端设计知识），避免每个 skill
+    都背上 ~34KB 无关上下文。
 
-    无 references 目录时返回空串（向后兼容）。
+    Args:
+        shared: 共享知识文件名（可带或不带 .md），为空表示不加载。
     """
     parts: list[str] = []
 
@@ -196,13 +200,18 @@ def _load_skill_references(skill_path: Path) -> str:
             except Exception as e:
                 log.warning("Failed to load reference %s: %s", ref_file, e)
 
-    # 2. 全局 _shared/*.md（跨 skill 共享的设计知识库）
+    # 2. 按声明加载全局 _shared/*.md
     shared_dir = SKILLS_DIR / "_shared"
-    if shared_dir.is_dir():
-        for shared_file in sorted(shared_dir.glob("*.md")):
+    if shared and shared_dir.is_dir():
+        for name in shared:
+            filename = name if name.endswith(".md") else f"{name}.md"
+            shared_file = shared_dir / filename
+            if not shared_file.exists():
+                log.warning("declared shared knowledge not found: %s", shared_file)
+                continue
             try:
                 content = shared_file.read_text(encoding="utf-8")
-                parts.append(f"\n\n---\n# Shared Knowledge: {shared_file.name}\n{content}")
+                parts.append(f"\n\n---\n# Shared Knowledge: {filename}\n{content}")
             except Exception as e:
                 log.warning("Failed to load shared %s: %s", shared_file, e)
 
@@ -256,8 +265,8 @@ def render_skill_prompt(
         version: 可选，指定 skill 版本；None 表示默认，"latest" 取最新版本目录。
     """
     md = load_skill_md(skill_name, version)
-    # 剥离 front matter（不送入 LLM，避免浪费 token）
-    _, md = _parse_front_matter(md)
+    # 剥离 front matter（不送入 LLM，避免浪费 token），同时拿到 shared 声明
+    meta, md = _parse_front_matter(md)
 
     # 替换 $ARGUMENTS
     md = md.replace("$ARGUMENTS", arguments)
@@ -265,11 +274,9 @@ def render_skill_prompt(
     # 清理 slash command 引用
     md = _SLASH_CMD_RE.sub("", md)
 
-    # 拼接 skill references 与 _shared 知识库（curated design tokens、
-    # industry reasoning、UI checklist 等，使 SKILL.md 中的 "See references/"
-    # 引用可被 LLM 实际访问）
+    # 拼接 skill references 与按需声明的 _shared 知识库
     skill_path = resolve_skill_path(skill_name, version)
-    md += _load_skill_references(skill_path)
+    md += _load_skill_references(skill_path, meta.shared)
 
     # 拼接工作区文件清单（增强版：带大小与分类）
     if workspace_files:

@@ -176,6 +176,10 @@ ALL_TOOLS = [WRITE_FILE_TOOL, READ_FILE_TOOL, LIST_FILES_TOOL, RUN_COMMAND_TOOL,
 # 非递归工具集：子代理用，不含 dispatch_subagent（避免无限嵌套）
 ALL_TOOLS_NON_RECURSIVE = [WRITE_FILE_TOOL, READ_FILE_TOOL, LIST_FILES_TOOL, RUN_COMMAND_TOOL]
 
+# 循环检测阈值：完全相同的工具调用（write_file 含内容哈希）重复出现
+LOOP_WARN_THRESHOLD = 3
+LOOP_TERMINATE_THRESHOLD = 5
+
 
 # === 结构化工具错误 ===
 
@@ -432,16 +436,42 @@ class AgentRunResult:
 
 
 def _args_hash(name: str, args: dict) -> str:
-    """对工具调用做指纹，用于循环检测。write_file 的 content 不计入指纹
-    （避免合法的多次写不同内容被误判），只看 path + 其他参数。"""
+    """对工具调用做指纹，用于循环检测。
+
+    指纹包含 write_file 的内容哈希（而非内容本身）：
+    - 同一文件写入不同内容 → 指纹不同，不会误判为死循环（修复多 Task
+      迭代改写同一文件的常见场景）；
+    - 完全相同的调用重复 5 次 → 才是真死循环。
+    """
     if name == "write_file":
-        key = {"path": args.get("path", "")}
+        content = args.get("content", "")
+        if not isinstance(content, str):
+            content = str(content)
+        key = {
+            "path": args.get("path", ""),
+            "append": bool(args.get("append", False)),
+            "content_sha": hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()[:16],
+        }
     else:
         key = dict(args)
     try:
         return name + ":" + json.dumps(key, sort_keys=True, ensure_ascii=False)
     except (TypeError, ValueError):
         return name + ":" + str(sorted(key.items()))
+
+
+def _message_tokens(message: dict) -> int:
+    """估算单条消息的 token 数。
+
+    除 content 外必须计入 assistant.tool_calls 的 arguments——写文件的内容
+    体积全在 arguments 里，只统计 content 会严重低估上下文占用。
+    """
+    tokens = estimate_tokens(str(message.get("content") or ""))
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        tokens += estimate_tokens(str(fn.get("name") or ""))
+        tokens += estimate_tokens(str(fn.get("arguments") or ""))
+    return tokens
 
 
 def _compress_messages(messages: list[dict], keep_recent: int = 10) -> list[dict]:
@@ -558,6 +588,7 @@ async def run_agent_loop(
     # 循环检测：滑动窗口记录最近工具调用指纹
     recent_calls: deque[str] = deque(maxlen=8)
     loop_warned = False
+    budget_warned = False
 
     for iteration in range(1, max_iter + 1):
         result.iterations = iteration
@@ -565,11 +596,27 @@ async def run_agent_loop(
 
         # token 预算守卫：超 70% 上下文窗口则压缩历史
         if context_window > 0:
-            est_tokens = sum(estimate_tokens(str(m.get("content", ""))) for m in messages)
-            if est_tokens > context_window * 0.7:
-                log.warning("context budget exceeded: est=%d > 70%% of %d, compressing",
-                            est_tokens, context_window)
-                messages = _compress_messages(messages)
+            est_tokens = sum(_message_tokens(m) for m in messages)
+            budget = context_window * 0.7
+            if est_tokens > budget:
+                compressed = _compress_messages(messages)
+                if compressed is not messages:
+                    saved = est_tokens - sum(_message_tokens(m) for m in compressed)
+                    if saved >= 200:
+                        log.warning(
+                            "context budget exceeded: est=%d > %.0f, compressed (saved≈%d tokens)",
+                            est_tokens, budget, saved,
+                        )
+                        messages = compressed
+                    elif not budget_warned:
+                        # 历史里没有多少可压缩内容——说明 base prompt 本身过大，
+                        # 反复压缩只会丢失上下文，提示一次后不再重试。
+                        budget_warned = True
+                        log.warning(
+                            "context budget exceeded: est=%d > %.0f, but only %d tokens compressible "
+                            "(base prompt too large; reduce skill references)",
+                            est_tokens, budget, max(0, saved),
+                        )
 
         # 无输出超时看门狗：用 shield + wait_for 循环，delta 到达则续命
         last_delta = {"time": time.monotonic()}
@@ -676,28 +723,28 @@ async def run_agent_loop(
             if on_tool_call:
                 await on_tool_call(tc.name, tc.arguments)
 
-            # 循环检测
+            # 循环检测：只有「完全相同的调用」才计数（write_file 指纹含内容哈希，
+            # 同一文件写入不同内容不算重复）。命中时不跳过执行——跳过会导致
+            # tool_call 没有对应的 tool 消息，下一次请求直接被 API 拒绝（400）。
             fingerprint = _args_hash(tc.name, tc.arguments)
             recent_calls.append(fingerprint)
             repeat_count = sum(1 for x in recent_calls if x == fingerprint)
-            if repeat_count >= 3:
-                if not loop_warned:
-                    loop_warned = True
-                    # 注入提醒，再犯则终止
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"检测到你已重复调用 {tc.name}({tc.arguments.get('path', '')}) "
-                            f"{repeat_count} 次。请换思路或宣布任务结束，不要继续重复同样的调用。"
-                        ),
-                    })
-                    log.warning("loop detected: %s repeated %d times", tc.name, repeat_count)
-                    continue
-                else:
-                    result.error = f"检测到工具调用死循环：{tc.name} 重复 {repeat_count} 次，已终止"
-                    result.duration_sec = time.time() - start_time
-                    log.error("agent loop dead-loop terminated at iter %d", iteration)
-                    return result
+            loop_hint = ""
+            if repeat_count >= LOOP_TERMINATE_THRESHOLD:
+                result.error = (
+                    f"检测到工具调用死循环：{tc.name} 相同参数重复 {repeat_count} 次，已终止"
+                )
+                result.duration_sec = time.time() - start_time
+                log.error("agent loop dead-loop terminated at iter %d", iteration)
+                return result
+            if repeat_count >= LOOP_WARN_THRESHOLD and not loop_warned:
+                loop_warned = True
+                loop_hint = (
+                    f"\n\n[系统提示] 相同工具调用已重复 {repeat_count} 次"
+                    f"（{tc.name} {tc.arguments.get('path', '')}）。"
+                    "如果任务已完成请直接结束，否则请换一种做法，不要重复同样的调用。"
+                )
+                log.warning("loop warning: %s repeated %d times", tc.name, repeat_count)
 
             executor = _TOOL_EXECUTORS.get(tc.name)
             if tc.name == "dispatch_subagent":
@@ -717,6 +764,11 @@ async def run_agent_loop(
                 except Exception as e:
                     tool_result = _format_error(ToolError.UNKNOWN, str(e))
                     log.exception("tool %s execution failed", tc.name)
+
+            # 把循环提醒附在工具结果里返回（不用 system 消息，避免破坏
+            # assistant(tool_calls) → tool 的配对顺序）
+            if loop_hint:
+                tool_result = f"{tool_result}{loop_hint}"
 
             # 记录到结果
             if tc.name == "write_file":

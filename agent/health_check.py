@@ -18,12 +18,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .workspace import Workspace
 
 log = logging.getLogger(__name__)
+
+
+def _py() -> str:
+    """当前解释器路径（带引号）。
+
+    健康检查必须与主程序使用同一 Python 环境，否则 `python` 可能解析到
+    未安装 pytest / 项目依赖的另一个解释器，导致门禁误判。
+    """
+    exe = sys.executable or "python"
+    return f'"{exe}"'
 
 
 # === dev-code 按 project_type 的必需文件 ===
@@ -422,6 +433,8 @@ def check_all_code_files(workspace: Workspace) -> CheckResult:
     for p in sorted(code_dir.rglob("*")):
         if not p.is_file():
             continue
+        if "node_modules" in p.parts:
+            continue
         rel = p.relative_to(workspace.root).as_posix()
         ext = p.suffix.lower()
 
@@ -661,6 +674,8 @@ def check_test_files_exist(workspace: Workspace, test_dir: str = "") -> CheckRes
     for p in sorted(code_dir.rglob("*")):
         if not p.is_file():
             continue
+        if "node_modules" in p.parts:
+            continue
         name = p.name.lower()
         ext = p.suffix.lower()
         if ext not in test_exts:
@@ -668,7 +683,13 @@ def check_test_files_exist(workspace: Workspace, test_dir: str = "") -> CheckRes
         # pytest/unittest 风格：test_*.py
         # jest 风格：*.test.js / *.spec.js
         # go 风格：*_test.go
-        if name.startswith(test_prefixes) or any(name.endswith(s) for s in test_suffixes):
+        if (
+            name.startswith(test_prefixes)
+            or any(name.endswith(s) for s in test_suffixes)
+            # 兼容 run-tests.js / smoke-test.mjs / spec-runner.js 等命名
+            or "test" in name
+            or "spec" in name
+        ):
             rel = p.relative_to(workspace.root).as_posix()
             found_files.append(rel)
     if not found_files:
@@ -685,6 +706,55 @@ def _resolve_test_dir(workspace: Workspace) -> str:
         if workspace.file_exists(cand):
             return cand
     return ""
+
+
+def _test_command_prefix(test_dir: str) -> tuple[str, str]:
+    """返回 (cd 前缀, 测试目录相对前缀的路径)。
+
+    生成项目的依赖与入口都在 code/ 下，从 code/ 执行测试才能解析
+    `backend.main` 这类导入；根目录执行会 ImportError。
+    """
+    td = test_dir.strip("/")
+    if td == "code" or td.startswith("code/"):
+        rel = td[len("code/"):] or "."
+        return 'cd "code" && ', rel
+    return "", td
+
+
+def _find_node_project(workspace: Workspace, test_dir: str) -> str:
+    """定位声明了 test 脚本（或测试框架）的 package.json 目录。
+
+    Returns:
+        相对工作区根目录的目录路径；未找到返回空串（在根目录执行）。
+    """
+    import json as _json
+
+    code_dir = workspace.root / "code"
+    if not code_dir.exists():
+        return ""
+
+    runners = ("jest", "vitest", "mocha", "@playwright/test")
+    best = ""
+    for p in code_dir.rglob("package.json"):
+        if "node_modules" in p.parts:
+            continue
+        try:
+            data = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        deps = {**(data.get("dependencies") or {}), **(data.get("devDependencies") or {})}
+        scripts = data.get("scripts") or {}
+        has_test_script = bool(str(scripts.get("test", "")).strip())
+        if not has_test_script and not any(k in deps for k in runners):
+            continue
+        rel_dir = p.parent.relative_to(workspace.root).as_posix()
+        # 测试目录位于该目录下 → 最贴近，直接采用
+        if test_dir == rel_dir or test_dir.startswith(rel_dir + "/"):
+            return rel_dir
+        # 否则取层级最深（最具体）的候选
+        if not best or len(rel_dir) > len(best):
+            best = rel_dir
+    return best
 
 
 async def _run_command_capture(
@@ -739,21 +809,23 @@ async def check_tests_pass(workspace: Workspace, timeout: int = 60) -> CheckResu
     errors: list[str] = []
     warnings: list[str] = []
 
-    # 检测 Python 测试：测试目录下有 .py 文件 + 代码目录有 requirements.txt
-    has_py_tests = any(
-        (workspace.root / test_dir / p).exists()
-        for p in _walk_py_files(workspace, test_dir)
-    ) if test_dir else False
+    # 检测 Python 测试：测试目录下存在 .py 文件
+    # 注意：_walk_py_files 返回的是相对工作区根目录的路径，不能再拼 test_dir
+    has_py_tests = bool(_walk_py_files(workspace, test_dir))
 
-    # 检测 Node 测试：package.json 含 jest/vitest/mocha
+    # 检测 Node 测试：package.json 含 test 脚本或 jest/vitest/mocha
     has_node_tests = _has_node_test_runner(workspace)
+
+    # 生成项目通常把依赖与测试都放在 code/ 下，从 code/ 执行才能正确解析
+    # `backend.main` / `tests/test_x.py` 的相对导入，也才能找到 package.json。
+    cd_prefix, rel_test_dir = _test_command_prefix(test_dir)
 
     if has_py_tests:
         # 优先 pytest，失败回退 python -m unittest
-        pytest_cmd = f"python -m pytest {test_dir} -v --tb=short 2>&1"
+        pytest_cmd = f"{cd_prefix}{_py()} -m pytest {rel_test_dir} -v --tb=short 2>&1"
         exit_code, out, err = await _run_command_capture(workspace, pytest_cmd, timeout)
         if exit_code == 0:
-            warnings.append(f"pytest 通过（exit=0）")
+            warnings.append("pytest 通过（exit=0）")
             # 摘要末尾 5 行
             tail = "\n".join((out or "").splitlines()[-5:])
             if tail:
@@ -762,7 +834,7 @@ async def check_tests_pass(workspace: Workspace, timeout: int = 60) -> CheckResu
         # pytest 失败：可能是 pytest 未安装，回退 unittest
         if "No module named pytest" in (out + err):
             warnings.append("pytest 未安装，回退 unittest")
-            unittest_cmd = f"python -m unittest discover -s {test_dir} -v 2>&1"
+            unittest_cmd = f"{cd_prefix}{_py()} -m unittest discover -s {rel_test_dir} -v 2>&1"
             ec2, out2, err2 = await _run_command_capture(workspace, unittest_cmd, timeout)
             if ec2 == 0:
                 warnings.append("unittest 通过（exit=0）")
@@ -774,16 +846,20 @@ async def check_tests_pass(workspace: Workspace, timeout: int = 60) -> CheckResu
         return CheckResult(ok=False, missing=[], errors=errors, warnings=warnings)
 
     if has_node_tests:
-        # 优先 npm test，失败尝试 npx jest
-        npm_cmd = "npm test --silent 2>&1"
+        project_dir = _find_node_project(workspace, test_dir)
+        prefix = f'cd "{project_dir}" && ' if project_dir else ""
+        npm_cmd = prefix + "npm test --silent 2>&1"
         exit_code, out, err = await _run_command_capture(workspace, npm_cmd, timeout=120)
         if exit_code == 0:
-            warnings.append("npm test 通过（exit=0）")
+            warnings.append(f"npm test 通过（exit=0，cwd={project_dir or '.'}）")
             tail = "\n".join((out or "").splitlines()[-5:])
             if tail:
                 warnings.append(f"输出摘要:\n{tail}")
             return CheckResult(ok=True, missing=[], errors=[], warnings=warnings)
-        errors.append(f"npm test 失败（exit={exit_code}）:\n{out[-1500:]}\n{err[-500:]}")
+        errors.append(
+            f"npm test 失败（exit={exit_code}，cwd={project_dir or '.'}）:\n"
+            f"{out[-1500:]}\n{err[-500:]}"
+        )
         return CheckResult(ok=False, missing=[], errors=errors, warnings=warnings)
 
     return CheckResult(
@@ -801,6 +877,8 @@ def _walk_py_files(workspace: Workspace, test_dir: str) -> list[str]:
         return []
     result: list[str] = []
     for p in code_dir.rglob("*.py"):
+        if "node_modules" in p.parts:
+            continue
         rel = p.relative_to(workspace.root).as_posix()
         result.append(rel)
     return result
@@ -813,6 +891,8 @@ def _has_node_test_runner(workspace: Workspace) -> bool:
     if not code_dir.exists():
         return False
     for p in code_dir.rglob("package.json"):
+        if "node_modules" in p.parts:
+            continue
         try:
             data = _json.loads(p.read_text(encoding="utf-8"))
         except Exception:
@@ -859,7 +939,7 @@ async def check_runtime_succeeds(workspace: Workspace, project_type: str, timeou
         # 后台启动 uvicorn，sleep 3s，curl /health，最后 kill
         import time
         start_cmd = (
-            f"python -m uvicorn code.backend.main:app --host 127.0.0.1 --port 8765 2>&1"
+            f'cd "code" && {_py()} -m uvicorn backend.main:app --host 127.0.0.1 --port 8765 2>&1'
         )
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -876,7 +956,7 @@ async def check_runtime_succeeds(workspace: Workspace, project_type: str, timeou
             # 等待服务启动
             await asyncio.sleep(3)
             # 调 /health
-            curl_cmd = "python -c \"import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5); print(r.status, r.read().decode()[:200])\" 2>&1"
+            curl_cmd = f"{_py()} -c \"import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=5); print(r.status, r.read().decode()[:200])\" 2>&1"
             ec, out, err = await _run_command_capture(workspace, curl_cmd, timeout=10)
             if ec == 0 and "200" in out:
                 warnings.append(f"后端 /health 返回 200: {out.strip()[:200]}")
@@ -900,7 +980,7 @@ async def check_runtime_succeeds(workspace: Workspace, project_type: str, timeou
                 ok=False, missing=["code/main.py"],
                 errors=["入口 code/main.py 不存在"], warnings=[]
             )
-        cmd = "python code/main.py --help 2>&1"
+        cmd = f"{_py()} code/main.py --help 2>&1"
         ec, out, err = await _run_command_capture(workspace, cmd, timeout=15)
         if ec == 0:
             warnings.append(f"python main.py --help 退出码 0: {out.strip()[:200]}")
@@ -908,7 +988,7 @@ async def check_runtime_succeeds(workspace: Workspace, project_type: str, timeou
         # --help 不支持时，尝试 python main.py（可能需要参数）
         if "unrecognized arguments" in (out + err) or "no such option" in (out + err).lower():
             warnings.append("--help 不支持，尝试 python code/main.py")
-            ec2, out2, err2 = await _run_command_capture(workspace, "python code/main.py 2>&1", timeout=10)
+            ec2, out2, err2 = await _run_command_capture(workspace, f"{_py()} code/main.py 2>&1", timeout=10)
             if ec2 == 0:
                 warnings.append("python main.py 退出码 0")
                 return CheckResult(ok=True, missing=[], errors=[], warnings=warnings)

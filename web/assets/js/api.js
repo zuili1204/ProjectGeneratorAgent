@@ -60,7 +60,36 @@ const API = (() => {
     listWorkflows: () => request('GET', '/api/workflows'),
     getWorkflow: (id) => request('GET', `/api/workflows/${id}`),
     deleteWorkflow: (id) => request('DELETE', `/api/workflows/${id}`),
-    exportWorkflow: (id) => window.open(`/api/workflows/${id}/export`, '_blank'),
+    exportWorkflow: async (id) => {
+      const token = getToken();
+      let resp;
+      try {
+        resp = await fetch(`/api/workflows/${id}/export`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+      } catch (e) {
+        toast('导出失败：网络错误', 'error');
+        return;
+      }
+      if (resp.status === 401) {
+        toast('服务令牌缺失或无效，正在跳转设置页', 'error');
+        location.href = '/settings.html?auth=1';
+        return;
+      }
+      if (!resp.ok) {
+        toast(`导出失败：HTTP ${resp.status}`, 'error');
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${id}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
     listFiles: (id) => request('GET', `/api/workflows/${id}/files`),
     readFile: (id, path) => request('GET', `/api/workflows/${id}/files/${path}`),
     submitCheckpoint: (id, payload) => request('POST', `/api/workflows/${id}/checkpoint`, payload),
@@ -81,9 +110,12 @@ const API = (() => {
     setConfig: (key, value) => request('PUT', '/api/config', { key, value }),
 
     // === WebSocket ===
+    // 浏览器 WS 不能带 Authorization 头，token 走 query 参数（服务端同时校验 Origin）
     wsUrl: (id) => {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      return `${proto}//${location.host}/ws/workflows/${id}`;
+      const token = getToken();
+      const qs = token ? `?token=${encodeURIComponent(token)}` : '';
+      return `${proto}//${location.host}/ws/workflows/${id}${qs}`;
     },
   };
 })();

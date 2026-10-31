@@ -16,7 +16,29 @@ from pathlib import Path
 log = logging.getLogger("pga.config")
 
 # === 路径常量 ===
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+def _resolve_project_root() -> Path:
+    """定位包含 skills/ templates/ web/ 的项目根目录。
+
+    解析顺序：
+    1. 环境变量 PGA_HOME（wheel 安装或自定义部署时指向资源目录）
+    2. 包所在目录的上一级（源码 / `pip install -e .` 场景）
+    3. 当前工作目录（从项目根目录运行 `pga` 的场景）
+    """
+    env = os.environ.get("PGA_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+
+    root = Path(__file__).resolve().parent.parent
+    if (root / "skills").is_dir() or (root / "templates").is_dir():
+        return root
+
+    cwd = Path.cwd()
+    if (cwd / "skills").is_dir() or (cwd / "templates").is_dir():
+        return cwd
+    return root
+
+
+PROJECT_ROOT = _resolve_project_root()
 SKILLS_DIR = PROJECT_ROOT / "skills"
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 WORKSPACES_DIR = PROJECT_ROOT / "workspaces"
@@ -36,6 +58,12 @@ VALID_PROJECT_TYPES: tuple[str, ...] = (
 VALID_CHECKPOINT_TIMEOUT_ACTIONS: tuple[str, ...] = (
     "auto_approve", "auto_reject", "wait_forever",
 )
+
+# 验证门禁模式（dev-selfcheck）
+#   strict: 测试目录/测试文件/测试执行/运行时 四项全过
+#   tests:  只硬性要求测试通过，不启动生成的项目（默认，避免副作用）
+#   off:    不执行验证门禁
+VALID_VERIFICATION_GATES: tuple[str, ...] = ("strict", "tests", "off")
 
 
 # === 默认 LLM 配置 ===
@@ -267,6 +295,9 @@ class WorkflowConfig:
     # 全局 / 步骤级超时
     global_timeout: int = DEFAULT_GLOBAL_TIMEOUT
     step_timeout: int = DEFAULT_STEP_TIMEOUT
+    # 验证门禁（dev-selfcheck）：strict / tests / off
+    #   strict — 测试 + 运行时全过；tests — 只硬性要求测试通过；off — 关闭
+    verification_gate: str = "tests"
     # Git 集成（P3-1）：create_workflow 时 git init，每步 commit，rerun 新建分支。
     # git 不可用时优雅降级，不影响主流程。可通过参数关闭。
     enable_git: bool = True
@@ -277,6 +308,9 @@ class WorkflowConfig:
             self.project_type = "fullstack"
         if self.checkpoint_timeout_action not in VALID_CHECKPOINT_TIMEOUT_ACTIONS:
             self.checkpoint_timeout_action = "auto_reject"
+        if self.verification_gate not in VALID_VERIFICATION_GATES:
+            log.warning("unknown verification_gate %r, fallback to tests", self.verification_gate)
+            self.verification_gate = "tests"
 
     @classmethod
     def from_dict(cls, d: dict | None = None) -> "WorkflowConfig":
@@ -292,5 +326,6 @@ class WorkflowConfig:
             health_retry=int(d.get("health_retry", DEFAULT_HEALTH_RETRY)),
             global_timeout=int(d.get("global_timeout", DEFAULT_GLOBAL_TIMEOUT)),
             step_timeout=int(d.get("step_timeout", DEFAULT_STEP_TIMEOUT)),
+            verification_gate=str(d.get("verification_gate", "tests")),
             enable_git=bool(d.get("enable_git", True)),
         )

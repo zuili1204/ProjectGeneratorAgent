@@ -144,6 +144,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         "enable_checkpoints": not args.no_checkpoint,
         "auto_proceed": args.auto,
         "project_type": args.project_type,
+        "verification_gate": args.verification_gate,
     })
 
     # 创建引擎
@@ -173,6 +174,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             "project_type": args.project_type,
             "auto_proceed": args.auto,
             "enable_review": args.enable_review,
+            "verification_gate": args.verification_gate,
         },
     )
     _ok(f"工作流已创建: {workflow_id}")
@@ -412,7 +414,12 @@ async def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 async def _cmd_approve(args: argparse.Namespace) -> int:
-    """执行 `pga approve <id> [反馈]`。"""
+    """执行 `pga approve <id> [反馈]`。
+
+    只写检查点信号（`_checkpoints/{step}.json`），不启动引擎：
+    - 若 `pga run` 进程仍在运行，它会在 0.5s 内轮询到并继续；
+    - 若进程已退出，`pga resume <id>` 会消费该信号且**不重跑**该步。
+    """
     engine = WorkflowEngine()
     state = engine.get_state(args.workflow_id)
     if not state:
@@ -420,35 +427,27 @@ async def _cmd_approve(args: argparse.Namespace) -> int:
         return 1
 
     # 检查是否在等待检查点
-    waiting = any(s.status == "waiting_checkpoint" for s in state.steps)
+    waiting = next(
+        (s.skill_name for s in state.steps if s.status == "waiting_checkpoint"), ""
+    )
     if not waiting:
         _err(f"工作流 {args.workflow_id} 当前不在等待检查点")
         return 1
 
     feedback = args.feedback or ""
-    submit_checkpoint(args.workflow_id, {"approved": True, "feedback": feedback})
-    _ok(f"已确认检查点: {args.workflow_id}")
+    submit_checkpoint(
+        args.workflow_id,
+        {"action": "approve", "feedback": feedback},
+        step=waiting,
+    )
+    _ok(f"已确认检查点: {args.workflow_id} / {waiting}")
     if feedback:
         _print(f"反馈: {feedback}", style="dim")
-
-    if not args.no_run:
-        _print("自动恢复工作流...", style="cyan")
-        from .workflow_engine import set_broadcast
-        set_broadcast(_console_broadcast)
-        try:
-            state = await engine.run_workflow(args.workflow_id)
-        finally:
-            await engine.close()
-        if state.status == "completed":
-            _ok("工作流执行完成")
-            _print_summary(engine, args.workflow_id, state)
-            return 0
-        elif state.status == "paused":
-            _print("工作流再次暂停", style="yellow")
-            return 0
-        else:
-            _err(f"工作流失败: {state.status}")
-            return 2
+    _print(
+        "信号已落盘：运行中的进程会自动继续；若进程已退出，请执行 "
+        f"`pga resume {args.workflow_id}`",
+        style="dim",
+    )
     return 0
 
 
@@ -460,7 +459,9 @@ async def _cmd_reject(args: argparse.Namespace) -> int:
         _err(f"工作流不存在: {args.workflow_id}")
         return 1
 
-    waiting = any(s.status == "waiting_checkpoint" for s in state.steps)
+    waiting = next(
+        (s.skill_name for s in state.steps if s.status == "waiting_checkpoint"), ""
+    )
     if not waiting:
         _err(f"工作流 {args.workflow_id} 当前不在等待检查点")
         return 1
@@ -469,9 +470,18 @@ async def _cmd_reject(args: argparse.Namespace) -> int:
         _err("打回必须提供反馈内容")
         return 1
 
-    submit_checkpoint(args.workflow_id, {"approved": False, "feedback": args.feedback})
-    _ok(f"已打回检查点: {args.workflow_id}")
+    submit_checkpoint(
+        args.workflow_id,
+        {"action": "reject", "feedback": args.feedback},
+        step=waiting,
+    )
+    _ok(f"已打回检查点: {args.workflow_id} / {waiting}")
     _print(f"反馈: {args.feedback}", style="dim")
+    _print(
+        "运行中的进程会读取该信号并暂停；若进程已退出，"
+        f"`pga resume {args.workflow_id}` 会应用反馈并重跑该步",
+        style="dim",
+    )
     return 0
 
 
@@ -487,7 +497,9 @@ async def _cmd_revise(args: argparse.Namespace) -> int:
         _err(f"工作流不存在: {args.workflow_id}")
         return 1
 
-    waiting = any(s.status == "waiting_checkpoint" for s in state.steps)
+    waiting = next(
+        (s.skill_name for s in state.steps if s.status == "waiting_checkpoint"), ""
+    )
     if not waiting:
         _err(f"工作流 {args.workflow_id} 当前不在等待检查点")
         return 1
@@ -501,14 +513,17 @@ async def _cmd_revise(args: argparse.Namespace) -> int:
         "feedback": args.feedback,
         "target_section": args.target_section or "",
         "severity": args.severity or "",
-    })
-    _ok(f"已结构化打回检查点: {args.workflow_id}")
+    }, step=waiting)
+    _ok(f"已结构化打回检查点: {args.workflow_id} / {waiting}")
     _print(f"反馈: {args.feedback}", style="dim")
     if args.target_section:
         _print(f"目标章节: {args.target_section}", style="dim")
     if args.severity:
         _print(f"严重度: {args.severity}", style="dim")
-    _print("工作流已暂停，修复后用 `pga resume` 恢复或 `pga rerun` 重跑该步", style="cyan")
+    _print(
+        f"修复后用 `pga resume {args.workflow_id}` 按此反馈重跑该步",
+        style="cyan",
+    )
     return 0
 
 
@@ -629,25 +644,25 @@ def _cmd_skills(args: argparse.Namespace) -> int:
         table.add_column("描述")
         for name in skills:
             try:
-                md = load_skill_md(name)
                 meta = load_skill_meta(name)
-                # 跳过 front matter，取第一个 ## 标题作为描述来源
-                desc = ""
-                in_front_matter = False
-                for line in md.split("\n"):
-                    line = line.strip()
-                    if line == "---":
-                        in_front_matter = not in_front_matter
-                        continue
-                    if in_front_matter:
-                        continue
-                    # 取第一个 # 标题后的正文行
-                    if line.startswith("# "):
-                        # 顶级标题后面找正文
-                        continue
-                    if line and not line.startswith("#") and not line.startswith("<!--"):
-                        desc = line[:60]
-                        break
+                # 优先用 front matter 的 description（Use when ... 触发条件），
+                # 无则回退到正文首个段落
+                desc = (meta.description or "").strip()
+                if not desc:
+                    md = load_skill_md(name)
+                    in_front_matter = False
+                    for line in md.split("\n"):
+                        line = line.strip()
+                        if line == "---":
+                            in_front_matter = not in_front_matter
+                            continue
+                        if in_front_matter:
+                            continue
+                        if line and not line.startswith("#") and not line.startswith("<!--"):
+                            desc = line
+                            break
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
                 outputs = ", ".join(meta.outputs) if meta.outputs else "-"
                 table.add_row(name, meta.version or "-", outputs, desc)
             except Exception as e:
@@ -766,6 +781,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--enable-review", action="store_true",
                        help="启用 dev-review 评审步骤（需模板支持，默认关闭）")
     p_run.add_argument("--max-iter", type=int, default=30, help="agent 最大迭代次数（默认 30）")
+    p_run.add_argument("--verification-gate", default="tests",
+                       choices=["strict", "tests", "off"],
+                       help="dev-selfcheck 验证门禁（默认 tests：只验证测试通过；strict 额外启动项目做运行时验证）")
     p_run.set_defaults(func=_cmd_run, is_async=True)
 
     # list
@@ -786,7 +804,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_approve = sub.add_parser("approve", help="检查点确认通过")
     p_approve.add_argument("workflow_id", help="工作流 ID")
     p_approve.add_argument("feedback", nargs="?", default="", help="可选反馈")
-    p_approve.add_argument("--no-run", action="store_true", help="仅提交确认，不自动恢复")
+    p_approve.add_argument("--no-run", action="store_true",
+                           help="已废弃：approve 只写检查点信号，不再自动拉起引擎")
     p_approve.set_defaults(func=_cmd_approve, is_async=True)
 
     # reject

@@ -1,10 +1,11 @@
 ---
 name: dev-design
-version: 1.4.0
+version: 1.4.1
 description: Use when REQUIREMENT.md exists and a buildable design blueprint is needed before coding — produces DESIGN.md (architecture, file-level tree, data model, interfaces, task list) plus DESIGN_SYSTEM.md (semantic color/typography/spacing/motion tokens) that dev-code consumes directly
 inputs: [$ARGUMENTS]
 outputs: [DESIGN.md, DESIGN_SYSTEM.md]
 depends_on: [REQUIREMENT.md]
+shared: [design-principles, color-theory, typography-pairing, motion-basics, accessibility-checklist]
 est_tokens: 6000
 est_iters: 12
 ---
