@@ -1,6 +1,6 @@
 ---
 name: dev-debug
-version: 1.1.1
+version: 1.2.0
 description: Use when dev-code or dev-selfcheck hits a repeatedly failing error and "try again" patching no longer works — runs hypothesis-driven systematic debugging (root-cause investigation, pattern analysis, hypothesis testing, implementation) and produces DEBUG_REPORT.md
 inputs: [$ARGUMENTS]
 outputs: [DEBUG_REPORT.md]
@@ -18,12 +18,14 @@ est_iters: 20
 
 ## Objective
 
-When `dev-code` / `dev-selfcheck` encounter a repeatedly failing error (failing tests, runtime crash, API error) and "try again" patching fails, manually invoke this step to perform **hypothesis-driven systematic debugging**. Produce `DEBUG_REPORT.md` recording the root-cause investigation, hypothesis verification, fix process, and conclusion.
+When `dev-code` / `dev-selfcheck` encounter a repeatedly failing error (failing tests, runtime crash, API error) and "try again" patching fails, perform **hypothesis-driven systematic debugging**. Produce `DEBUG_REPORT.md` recording the root-cause investigation, hypothesis verification, fix process, and conclusion.
 
-This step is **NOT part of the default workflow** — it is an on-demand standalone skill. Adapted from the superpowers systematic-debugging methodology: no relying on luck, rely on the scientific method.
+> **v1.2 change**: no longer a purely on-demand skill. The engine auto-escalates here when a code step exhausts its health-check retries (`auto_debug=true`), and `pga debug <id>` invokes it manually on a failed step. In both cases you MUST **fix the code**, not just write the report — the caller re-runs the health checks immediately after this step. The failure reason and the original step are injected in the prompt; start from that evidence instead of rescanning everything.
 
 ## When to Invoke
 
+- **Automatic**: a code step exhausted its health-check retries (`auto_debug=true`, default) — the engine calls this skill, then re-checks the original step
+- **Manual**: `pga debug <id> --step <skill> [--reason ...]` on a failed workflow
 - dev-selfcheck's test suite fails after 3 consecutive fix attempts
 - Runtime errors (500 / ImportError / ModuleNotFoundError / TypeError) recur repeatedly
 - "Changed A but got error B" — suspected shared state or coupling

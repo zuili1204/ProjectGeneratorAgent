@@ -7,6 +7,7 @@
     pga resume <workflow_id>          # 恢复暂停的工作流
     pga approve <workflow_id> [反馈]  # 检查点确认
     pga reject <workflow_id> <反馈>   # 检查点打回
+    pga debug <workflow_id>           # 对失败步骤运行 dev-debug
     pga rerun <workflow_id> <skill>   # 重跑某步骤
     pga delete <workflow_id>          # 删除工作流
     pga templates                     # 列出模板
@@ -145,6 +146,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         "auto_proceed": args.auto,
         "project_type": args.project_type,
         "verification_gate": args.verification_gate,
+        "ui_gate": args.ui_gate,
     })
 
     # 创建引擎
@@ -175,6 +177,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             "auto_proceed": args.auto,
             "enable_review": args.enable_review,
             "verification_gate": args.verification_gate,
+            "ui_gate": args.ui_gate,
         },
     )
     _ok(f"工作流已创建: {workflow_id}")
@@ -214,15 +217,18 @@ def _print_summary(engine: WorkflowEngine, workflow_id: str, state: WorkflowStat
         table.add_column("状态", style="green")
         table.add_column("迭代", justify="right")
         table.add_column("Tokens", justify="right")
+        table.add_column("调试", justify="right")
         table.add_column("产出文件")
         for s in state.steps:
             files = ", ".join(s.output_files) if s.output_files else "-"
-            table.add_row(s.skill_name, s.status, str(s.iterations), str(s.tokens), files)
+            debug = str(s.debug_rounds) if s.debug_rounds else "-"
+            table.add_row(s.skill_name, s.status, str(s.iterations), str(s.tokens), debug, files)
         console.print(table)
     else:
         print(f"\n=== 工作流 {workflow_id} 产出 ===")
         for s in state.steps:
-            print(f"  {s.skill_name}: {s.status} (iter={s.iterations}, tokens={s.tokens})")
+            debug = f", debug={s.debug_rounds}" if s.debug_rounds else ""
+            print(f"  {s.skill_name}: {s.status} (iter={s.iterations}, tokens={s.tokens}{debug})")
             for f in s.output_files:
                 print(f"    - {f}")
 
@@ -527,6 +533,70 @@ async def _cmd_revise(args: argparse.Namespace) -> int:
     return 0
 
 
+# === debug ===
+
+async def _cmd_debug(args: argparse.Namespace) -> int:
+    """执行 `pga debug <id> [--step <skill>]`：对失败步骤运行 dev-debug。"""
+    engine = WorkflowEngine()
+    state = engine.get_state(args.workflow_id)
+    if not state:
+        _err(f"工作流不存在: {args.workflow_id}")
+        return 1
+    if state.status == "corrupted":
+        _err("工作流状态已损坏，无法调试")
+        return 1
+
+    skill = args.step
+    if not skill:
+        failed = [s.skill_name for s in state.steps if s.status == "failed"]
+        if not failed:
+            _err("没有 failed 步骤；请用 --step 指定要调试的步骤")
+            return 1
+        skill = failed[0]
+
+    from .workflow_engine import set_broadcast
+    set_broadcast(_console_broadcast)
+    _print(f"对 {skill} 运行 dev-debug（recheck={not args.no_recheck}）...", style="cyan")
+
+    try:
+        state = await engine.debug_step(
+            args.workflow_id,
+            skill,
+            reason=args.reason,
+            recheck=not args.no_recheck,
+            resume=args.resume,
+        )
+    finally:
+        await engine.close()
+
+    step = next((s for s in state.steps if s.skill_name == skill), None)
+    if step is None:
+        _err(f"未找到步骤: {skill}")
+        return 1
+    if step.debug_reports:
+        _ok(f"调试报告: {', '.join(step.debug_reports)}")
+
+    if args.resume:
+        if state.status == "completed":
+            _ok("工作流执行完成")
+            _print_summary(engine, args.workflow_id, state)
+            return 0
+        if state.status == "paused":
+            _print("工作流再次暂停（后续检查点待确认）", style="yellow")
+            return 0
+        _err(f"工作流状态: {state.status}")
+        return 2
+
+    if step and step.status == "completed":
+        _ok("步骤已修复并通过健康检查")
+        _print(f"运行 `pga resume {args.workflow_id}` 继续后续步骤", style="dim")
+        return 0
+    if step and step.error_message:
+        _err(f"调试后仍未通过: {step.error_message[:300]}")
+        return 2
+    return 0
+
+
 # === rerun ===
 
 async def _cmd_rerun(args: argparse.Namespace) -> int:
@@ -784,6 +854,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--verification-gate", default="tests",
                        choices=["strict", "tests", "off"],
                        help="dev-selfcheck 验证门禁（默认 tests：只验证测试通过；strict 额外启动项目做运行时验证）")
+    p_run.add_argument("--ui-gate", default="block",
+                       choices=["block", "warn", "off"],
+                       help="静态 UI 质量门（默认 block：裸 hex/低对比度/缺 alt 等阻断）")
     p_run.set_defaults(func=_cmd_run, is_async=True)
 
     # list
@@ -824,6 +897,16 @@ def build_parser() -> argparse.ArgumentParser:
                           choices=["blocker", "major", "minor", "nit"],
                           help="问题严重度")
     p_revise.set_defaults(func=_cmd_revise, is_async=True)
+
+    # debug（对 failed 步骤运行 dev-debug）
+    p_debug = sub.add_parser("debug", help="对失败步骤运行 dev-debug 根因调试")
+    p_debug.add_argument("workflow_id", help="工作流 ID")
+    p_debug.add_argument("--step", default="", help="skill 名（默认选第一个 failed 步骤）")
+    p_debug.add_argument("--reason", default="", help="补充失败现象或线索")
+    p_debug.add_argument("--no-recheck", action="store_true",
+                         help="只跑调试，不重新健康检查、不标记完成")
+    p_debug.add_argument("--resume", action="store_true", help="修复后继续执行后续步骤")
+    p_debug.set_defaults(func=_cmd_debug, is_async=True)
 
     # rerun
     p_rerun = sub.add_parser("rerun", help="重跑某步骤")

@@ -42,6 +42,7 @@ from .health_check import (
 )
 from .llm_client import LLMClient
 from .skill_loader import render_skill_prompt
+from .ui_gate import run_ui_gate
 from .workspace import Workspace, ProjectMeta
 
 log = logging.getLogger(__name__)
@@ -236,6 +237,9 @@ class StepState:
     commit_hash: str = ""
     # 基线 commit（P3-2）：本步开始时的 HEAD，用于 dev-review 做 diff 评审的 base
     base_commit: str = ""
+    # 自动调试（dev-debug）：本步已触发的调试轮次与产出的报告
+    debug_rounds: int = 0
+    debug_reports: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -981,6 +985,14 @@ class WorkflowEngine:
             if health_ok:
                 break
             if attempt >= max_retries:
+                # 重试耗尽：先尝试自动调试（dev-debug），修好后直接进入收尾
+                fixed, health_error = await self._maybe_escalate_debug(
+                    workspace, state, workflow_id, step_def, step_state,
+                    wf_config, health_error,
+                )
+                if fixed:
+                    break
+
                 step_state.status = "failed"
                 step_state.error_message = health_error
                 state.status = "failed"
@@ -1215,6 +1227,272 @@ class WorkflowEngine:
                 workspace, state, step_def, step_state, wf_config, workflow_id
             )
 
+    # === 自动调试（dev-debug） ===
+
+    async def _maybe_escalate_debug(
+        self,
+        workspace: Workspace,
+        state: WorkflowState,
+        workflow_id: str,
+        step_def: StepDef,
+        step_state: StepState,
+        wf_config: WorkflowConfig,
+        health_error: str,
+    ) -> tuple[bool, str]:
+        """健康检查重试耗尽后的自动调试升级。
+
+        只在「代码类步骤 + 有 code/ 目录」时触发；LLM/网络类错误不升级，
+        避免用调试掩盖基础设施故障。
+
+        Returns:
+            (是否修好, 最终错误信息)；未触发时原样返回 health_error。
+        """
+        if not wf_config.auto_debug:
+            return False, health_error
+        if step_def.skill_name not in ("dev-code", "dev-selfcheck"):
+            return False, health_error
+        if not (workspace.root / "code").exists():
+            return False, health_error
+        if step_state.debug_rounds >= max(0, wf_config.debug_max_rounds):
+            return False, (
+                f"{health_error}\n\n（已达自动调试轮次上限 {wf_config.debug_max_rounds}）"
+            )
+        return await self._run_debug_agent(
+            workspace, state, workflow_id, step_def, step_state, wf_config,
+            health_error, recheck=True,
+        )
+
+    async def _run_debug_agent(
+        self,
+        workspace: Workspace,
+        state: WorkflowState,
+        workflow_id: str,
+        step_def: StepDef,
+        step_state: StepState,
+        wf_config: WorkflowConfig,
+        health_error: str,
+        recheck: bool = True,
+    ) -> tuple[bool, str]:
+        """执行一轮 dev-debug，并（可选）重新健康检查原步骤。
+
+        调试轮次、token、成本都累计到被调试的步骤上，便于 `pga show` 对齐。
+        """
+        prev_status = step_state.status
+        step_state.debug_rounds += 1
+        step_state.status = "running"
+        state.current_step = step_def.skill_name
+        state.updated_at = _now_iso()
+        self._save_state(workspace, state)
+
+        round_no = step_state.debug_rounds
+        await self._broadcast_log(
+            state, workflow_id, step_def.skill_name, "warn",
+            f"自动调试第 {round_no} 轮：调用 dev-debug 定位 {step_def.skill_name} 的失败根因"
+        )
+
+        extra_context = (
+            f"## 自动调试触发\n"
+            f"步骤 `{step_def.skill_name}` 健康检查连续失败（已重试 {step_state.retries} 次）。\n\n"
+            f"### 失败原因\n{health_error}\n\n"
+            f"### 要求\n"
+            "1. **先定位根因再改代码**：不要只写报告，也不要重复执行原命令碰运气\n"
+            "2. 必须产出 `DEBUG_REPORT.md`：现象 / 假设 / 验证命令与输出 / 根因 / 修复\n"
+            "3. 修复后用 `run_command` 复现并验证，贴出 `exit_code: 0` 证据\n"
+            "4. 只改与故障相关的文件，不要重写整个项目\n"
+            "5. 修复完成后立即结束，不要继续扩展功能\n"
+        )
+
+        try:
+            prompt = render_skill_prompt(
+                skill_name="dev-debug",
+                arguments=state.title,
+                extra_context=extra_context,
+                workspace_files=workspace.scan(),
+                workspace=workspace,
+            )
+        except Exception as e:
+            step_state.status = prev_status
+            self._save_state(workspace, state)
+            return False, f"{health_error}\n\n[dev-debug 加载失败] {e}"
+
+        _log_buf = {"text": ""}
+
+        async def on_output(text: str) -> None:
+            _log_buf["text"] += text
+            while "\n" in _log_buf["text"]:
+                line, _log_buf["text"] = _log_buf["text"].split("\n", 1)
+                line = line.strip()
+                if line:
+                    await self._broadcast_log(
+                        state, workflow_id, step_def.skill_name, "progress", line
+                    )
+
+        async def on_tool_call(name: str, args: dict) -> None:
+            remaining = _log_buf["text"].strip()
+            if remaining:
+                await self._broadcast_log(
+                    state, workflow_id, step_def.skill_name, "progress", remaining
+                )
+                _log_buf["text"] = ""
+            preview = json.dumps(args, ensure_ascii=False)[:160]
+            await self._broadcast_log(
+                state, workflow_id, step_def.skill_name, "info",
+                f"[debug] 调用工具: {name}({preview})"
+            )
+
+        async def on_tool_result(name: str, result: str) -> None:
+            preview = result[:160].replace("\n", " ")
+            await self._broadcast_log(
+                state, workflow_id, step_def.skill_name, "debug",
+                f"[debug] 工具结果: {name} -> {preview}"
+            )
+
+        try:
+            debug_result = await run_agent_loop(
+                llm=self.llm,
+                workspace=workspace,
+                prompt=prompt,
+                max_iter=min(20, wf_config.agent_max_iter),
+                on_output=on_output,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+                inactivity_timeout=wf_config.inactivity_timeout,
+                context_window=self.llm_config.context_window,
+            )
+        except Exception as e:
+            log.exception("dev-debug run failed for %s", step_def.skill_name)
+            debug_result = AgentRunResult(error=str(e))
+
+        # 指标与成本累计到被调试步骤
+        step_state.llm_calls += debug_result.llm_calls
+        step_state.tool_calls += debug_result.tool_calls
+        step_state.tokens += debug_result.total_tokens
+        step_state.duration_sec += debug_result.duration_sec
+        step_state.prompt_tokens += debug_result.prompt_tokens
+        step_state.completion_tokens += debug_result.completion_tokens
+        debug_cost = self.llm_config.estimate_cost(
+            debug_result.prompt_tokens, debug_result.completion_tokens
+        )
+        step_state.cost_usd += debug_cost
+
+        if workspace.file_exists("DEBUG_REPORT.md"):
+            if "DEBUG_REPORT.md" not in step_state.debug_reports:
+                step_state.debug_reports.append("DEBUG_REPORT.md")
+            if "DEBUG_REPORT.md" not in step_state.output_files:
+                step_state.output_files.append("DEBUG_REPORT.md")
+
+        self._save_state(workspace, state)
+        await self._broadcast_log(
+            state, workflow_id, step_def.skill_name, "info",
+            f"自动调试第 {round_no} 轮结束"
+            f"（iter={debug_result.iterations}, cost=${debug_cost:.4f}）"
+        )
+
+        if debug_result.error and not debug_result.files_written:
+            step_state.status = prev_status
+            self._save_state(workspace, state)
+            return False, f"{health_error}\n\n[dev-debug 执行失败] {debug_result.error}"
+
+        if not recheck:
+            step_state.status = prev_status
+            self._save_state(workspace, state)
+            return True, ""
+
+        health_ok, new_error, _ = await self._run_health_checks(
+            workspace, state, workflow_id, step_def, wf_config
+        )
+        if health_ok:
+            await self._broadcast_log(
+                state, workflow_id, step_def.skill_name, "info",
+                f"自动调试修复成功，{step_def.skill_name} 健康检查通过"
+            )
+            return True, ""
+
+        step_state.status = prev_status
+        self._save_state(workspace, state)
+        return False, f"{health_error}\n\n[dev-debug 后仍未通过] {new_error}"
+
+    async def debug_step(
+        self,
+        workflow_id: str,
+        skill_name: str = "",
+        reason: str = "",
+        recheck: bool = True,
+        resume: bool = False,
+    ) -> WorkflowState:
+        """手动对某个失败步骤运行 dev-debug（`pga debug`）。
+
+        - 省略 skill_name 时选第一个 failed 步骤；
+        - recheck=True 时修好后把步骤标记 completed、后续步骤置 stale；
+        - resume=True 时继续执行后续步骤。
+        """
+        workspace = Workspace(workflow_id)
+        state = self._load_state(workspace)
+        if state.status == "corrupted":
+            return state
+        tmpl = load_template(state.template)
+
+        if not skill_name:
+            for s in state.steps:
+                if s.status == "failed":
+                    skill_name = s.skill_name
+                    break
+        target_idx = next(
+            (i for i, s in enumerate(state.steps) if s.skill_name == skill_name), -1
+        )
+        if target_idx < 0:
+            state.add_log("", "error", f"debug: 找不到步骤 {skill_name or '(无 failed 步骤)'}")
+            self._save_state(workspace, state)
+            return state
+
+        # 按 skill 名从模板取定义（不依赖 state.steps 与模板索引严格对齐）
+        step_def = next(
+            (s for s in tmpl.sub_steps if s.skill_name == skill_name), None
+        )
+        if step_def is None:
+            state.add_log("", "error", f"debug: 模板中没有步骤 {skill_name}")
+            self._save_state(workspace, state)
+            return state
+        step_state = state.steps[target_idx]
+        wf_config = WorkflowConfig.from_dict(
+            {**asdict(self.workflow_config), **state.params}
+        )
+        health_error = (
+            reason
+            or step_state.error_message
+            or f"{step_def.skill_name} 手动调试（未提供失败原因）"
+        )
+
+        if state.status == "completed":
+            state.status = "paused"
+        self._save_state(workspace, state)
+
+        fixed, final_error = await self._run_debug_agent(
+            workspace, state, workflow_id, step_def, step_state, wf_config,
+            health_error, recheck=recheck,
+        )
+
+        if recheck and fixed:
+            await self._finalize_step(
+                workspace, state, step_def, step_state, wf_config, workflow_id
+            )
+            for j in range(target_idx + 1, len(state.steps)):
+                state.steps[j].status = "stale"
+            state.status = "paused"
+            state.updated_at = _now_iso()
+            state.add_log(
+                step_def.skill_name, "info",
+                "debug: 修复成功，步骤已标记 completed；后续步骤置 stale"
+            )
+            self._save_state(workspace, state)
+            if resume:
+                return await self.run_workflow(workflow_id)
+        elif not fixed:
+            step_state.error_message = final_error
+            self._save_state(workspace, state)
+
+        return state
+
     # === 健康检查 ===
 
     async def _run_health_checks(
@@ -1410,6 +1688,66 @@ class WorkflowEngine:
                             f"验证门禁通过: {report.summary}"
                         )
 
+        # 5. dev-selfcheck：静态 UI 质量门（仅前端项目）
+        if step_def.skill_name == "dev-selfcheck" and wf_config is not None:
+            ui_mode = getattr(wf_config, "ui_gate", "block")
+            if ui_mode != "off":
+                project_type = workspace.detect_project_type()
+                if project_type in ("fullstack", "frontend_only"):
+                    ui_report = None
+                    try:
+                        ui_report = run_ui_gate(workspace, project_type)
+                        workspace.write_file("UI_GATE.md", ui_report.to_markdown())
+                    except Exception as e:
+                        msg = f"UI 质量门执行异常: {e}"
+                        errors.append(msg)
+                        if not hint["type"]:
+                            hint = {"type": "ui_gate_failed", "detail": msg}
+                        state.add_log(step_def.skill_name, "error", msg)
+                        self._save_state(workspace, state)
+                        await self._broadcast_log(
+                            state, workflow_id, step_def.skill_name, "error", msg
+                        )
+
+                    if ui_report is not None:
+                        if ui_report.blockers:
+                            detail = "\n".join(
+                                f"- {b.file}:{b.line} [{b.code}] {b.message}"
+                                for b in ui_report.blockers[:15]
+                            )
+                            if len(ui_report.blockers) > 15:
+                                detail += f"\n- ... 其余 {len(ui_report.blockers) - 15} 项见 UI_GATE.md"
+                            if ui_mode == "block":
+                                msg = f"UI 质量门失败:\n{detail}"
+                                errors.append(msg)
+                                if not hint["type"]:
+                                    hint = {"type": "ui_gate_failed", "detail": msg}
+                                state.add_log(step_def.skill_name, "error", msg)
+                                self._save_state(workspace, state)
+                                await self._broadcast_log(
+                                    state, workflow_id, step_def.skill_name, "error", msg
+                                )
+                            else:
+                                msg = (
+                                    f"UI 门禁有 {len(ui_report.blockers)} 项 blocker"
+                                    f"（ui_gate=warn，不阻断）:\n{detail}"
+                                )
+                                state.add_log(step_def.skill_name, "warn", msg)
+                                await self._broadcast_log(
+                                    state, workflow_id, step_def.skill_name, "warn", msg
+                                )
+                        if ui_report.warnings:
+                            await self._broadcast_log(
+                                state, workflow_id, step_def.skill_name, "warn",
+                                f"UI 门禁警告 {len(ui_report.warnings)} 项，详见 UI_GATE.md"
+                            )
+                        if ui_report.ok and not ui_report.findings:
+                            self._save_state(workspace, state)
+                            await self._broadcast_log(
+                                state, workflow_id, step_def.skill_name, "info",
+                                f"UI 质量门通过: {ui_report.summary}"
+                            )
+
         return (len(errors) == 0, "\n".join(errors), hint)
 
     def _build_retry_prompt(
@@ -1454,6 +1792,16 @@ class WorkflowEngine:
                 "用 write_file 覆盖写入修复后的完整文件\n"
                 "2. **只修有问题的文件**，不要重写整个项目\n"
                 "3. 修复完所有报错后立即结束\n"
+            )
+        elif "UI 质量门失败" in health_error:
+            base += (
+                "### 要求\n"
+                "1. 打开工作区根目录的 `UI_GATE.md`，按 `file:line` 逐项修复 blocker\n"
+                "2. 裸 hex 改为 `var(--token)`；token 只在 tokens.css / variables.css 中定义\n"
+                "3. 图片补 `alt`；按钮补可见文本或 `aria-label`；input 关联 `<label for>`\n"
+                "4. 补 `<meta name=\"viewport\">`、`@media` 断点、`prefers-reduced-motion`\n"
+                "5. 修完用 run_command 重跑测试，确保 `验证门禁` 也通过；不要删除检查项来规避\n"
+                "6. 完成后立即结束，不要重写整个项目\n"
             )
         elif "验证门禁失败" in health_error or "验证门禁执行异常" in health_error:
             base += (
@@ -1623,6 +1971,9 @@ class WorkflowEngine:
             concerns.append(f"软截断：达到迭代上限（有 {len(step_state.output_files)} 产出但未经完整验证）")
         if step_state.retries > 0:
             concerns.append(f"健康检查重试 {step_state.retries} 次才通过")
+        if step_state.debug_rounds > 0:
+            reports = ", ".join(step_state.debug_reports) or "无报告"
+            concerns.append(f"自动调试 {step_state.debug_rounds} 轮（{reports}）")
         if step_state.checkpoint_response:
             fb = step_state.checkpoint_response.get("feedback", "")
             sev = step_state.checkpoint_response.get("severity", "")
@@ -1643,7 +1994,8 @@ class WorkflowEngine:
             f"- base_commit: {step_state.base_commit or 'none'}\n"
             f"- files: {files_list}\n"
             f"- metrics: iter={step_state.iterations}, tokens={step_state.tokens}, "
-            f"cost=${step_state.cost_usd:.4f}, duration={step_state.duration_sec:.1f}s\n"
+            f"cost=${step_state.cost_usd:.4f}, duration={step_state.duration_sec:.1f}s, "
+            f"debug={step_state.debug_rounds}\n"
             f"- concerns:\n{concerns_text}\n"
         )
 
@@ -1883,6 +2235,8 @@ class WorkflowEngine:
         s.duration_sec = 0.0
         s.retries = 0
         s.soft_truncated = False
+        s.debug_rounds = 0
+        s.debug_reports = []
         # 成本与版本字段重置
         s.prompt_tokens = 0
         s.completion_tokens = 0

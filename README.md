@@ -60,6 +60,7 @@ python -m agent.server
 - **工具调用驱动** — 基于 LLM function calling（write_file / read_file / list_files / run_command），模型自主决定写哪些文件
 - **检查点机制** — 每步产出后可暂停审核，支持 approve / reject / revise（结构化打回带目标章节与严重度）
 - **多层健康检查** — 主产物大小 + 二级文件齐全 + 代码语法检查 + dev-selfcheck 真实执行测试（`strict` 模式下额外做运行时验证），失败按原因分类驱动补全重试
+- **自动调试** — 健康检查重试耗尽后自动调用 `dev-debug` 定位根因并修复，修好后继续收尾；`pga debug` 可对失败步骤手动介入
 - **重试与容错** — LLM 调用指数退避重试、无输出超时看门狗、循环检测、上下文压缩、state.json 原子写 + 备份
 - **命令沙箱** — 拦截 `rm -rf` / `format` / 外发请求等危险操作，支持 Windows 盘符保护
 - **SKILL 版本化** — 支持 `skills/<name>/<version>/SKILL.md` 目录级版本隔离，`rerun --latest` 升级
@@ -68,7 +69,7 @@ python -m agent.server
 - **两种运行形态** — CLI 单进程 + FastAPI 服务（含 WebSocket 实时日志、Token 认证、CORS 白名单）
 - **Web 前端** — 创建工作流、实时日志、文件浏览、检查点交互、设置页
 - **设计系统生成** — dev-design 产出 DESIGN_SYSTEM.md（语义化 color/typography/spacing/motion token），dev-code 落地为 tokens.css，前端组件禁止裸 hex/任意 px
-- **UI 质量门禁** — dev-selfcheck 增加前端 UI 门禁（token 纪律 / 图标纪律 / 对比度 / 触控目标 / 可访问性 / 响应式），dev-review 增加 UI 设计系统合规评审维度
+- **UI 质量门禁** — `agent/ui_gate.py` 静态执行并产出 `UI_GATE.md`：token 纪律（裸 hex）、WCAG 对比度、img alt / 按钮可访问名 / input label、viewport / @media / reduced-motion、emoji 结构图标、触控目标启发式；block 模式驱动重试
 - **Git 集成** — 工作区自动 git init/commit/branch，dev-review 基于 git diff 做增量评审，rerun 在独立分支隔离
 - **多 Agent 协作** — dev-review 通过 dispatch_subagent 派发独立子代理评审，避免"自己审自己"盲区；dev-debug 四阶段科学调试
 
@@ -84,6 +85,7 @@ ProjectGeneratorAgent/
 │   ├── skill_loader.py        #   SKILL.md 加载、渲染、版本解析（目录级版本化）
 │   ├── workspace.py           #   工作区管理、上下文摘要、原子写、备份
 │   ├── checkpoint_store.py    #   检查点落盘信号（_checkpoints/{step}.json，跨进程）
+│   ├── ui_gate.py             #   静态 UI 质量门（token/对比度/可访问性/响应式 → UI_GATE.md）
 │   ├── health_check.py        #   三层健康检查 + 产物契约校验
 │   ├── agent_loop.py          #   LLM 工具循环核心（看门狗/循环检测/上下文压缩）
 │   ├── workflow_engine.py     #   工作流引擎（调度/检查点/状态持久化/成本累计）
@@ -149,6 +151,7 @@ pga run "需求"                        # 启动工作流
   --no-checkpoint                      #   关闭检查点
   --max-iter <N>                       #   agent 最大迭代（默认 30）
   --verification-gate <mode>           #   strict / tests（默认）/ off，dev-selfcheck 门禁
+  --ui-gate <mode>                     #   block（默认）/ warn / off，静态 UI 质量门
 
 pga list                               # 列出所有工作流
 pga show <id>                          # 查看详情（含版本/成本/指标汇总）
@@ -165,6 +168,12 @@ pga revise <id> <反馈>                 # 结构化打回（带目标章节与�
 pga rerun <id> <skill>                 # 重跑某步骤（后续步骤自动级联重跑）
   --clean                              #   重跑前清理该步主产物
   --latest                             #   升级到最新 SKILL 版本
+
+pga debug <id>                         # 对失败步骤运行 dev-debug
+  --step <skill>                       #   指定步骤（默认第一个 failed）
+  --reason <text>                      #   补充失败现象/线索
+  --no-recheck                         #   只跑调试，不重新健康检查
+  --resume                             #   修复后继续执行后续步骤
 
 pga delete <id>                        # 删除工作流
 pga templates                          # 列出模板
@@ -245,9 +254,11 @@ python -m agent.server --host 127.0.0.1 --port 8000
 
 **检查点**：结构化响应 schema（`action: approve|reject|revise` + `target_section` + `severity: blocker|major|minor|nit` + `specific_issues`），旧版 `approved` 字段自动归一化兼容。revise 反馈精准注入 CONTEXT.md。检查点信号落盘到工作区 `_checkpoints/{step}.json`，运行中的工作流每 0.5s 轮询——`pga approve/reject/revise` 因此可以跨进程生效；进程退出后 `pga resume` 会消费已有决策（approve 直接收尾、不重跑该步），`failed` 步骤则重置为待执行并重跑，全部步骤 `completed/skipped` 才允许标记 `completed`。
 
+**自动调试**：`dev-code` / `dev-selfcheck` 健康检查重试耗尽后，`_maybe_escalate_debug` 渲染 dev-debug prompt（失败原因 + 文件清单 + 修复要求）并执行一轮根因调试，随后重跑健康检查；修好则继续收尾，修不好才判 failed。`auto_debug` / `debug_max_rounds` 可配，LLM/网络错误不触发（避免掩盖基础设施问题）。`pga debug` 复用同一实现，支持 `--no-recheck` 与 `--resume`。
+
 **版本化**：SKILL 支持双布局——平铺 `skills/<name>/SKILL.md`（默认）和版本目录 `skills/<name>/<version>/SKILL.md`（semver 降序排列）。`state.json` 记录每步实际版本，`rerun --latest` 升级到最新。
 
-**设计系统链路**：dev-design 产出 `DESIGN_SYSTEM.md`（语义化 color/typography/spacing/motion token + 行业反模式清单）→ dev-code 落地为 `code/frontend/src/styles/tokens.css`（+ `tailwind.config.js` 扩展），前端组件通过 `var(--*)` / Tailwind token 类消费，禁止裸 hex 与任意 px → dev-review 评审 token 合规性 → dev-selfcheck 执行 UI 质量门禁（grep 裸 hex / 对比度 / 可访问性 / 响应式）。共享设计知识沉淀在 `skills/_shared/`（curated references，非 CSV 数据库），由 SKILL.md front matter 的 `shared: [..]` 按需注入——如 dev-requirement 不加载设计知识，dev-code 只加载 color/typography，避免每个 skill 背 34KB 无关上下文。
+**设计系统链路**：dev-design 产出 `DESIGN_SYSTEM.md`（语义化 color/typography/spacing/motion token + 行业反模式清单）→ dev-code 落地为 `code/frontend/src/styles/tokens.css`（+ `tailwind.config.js` 扩展），前端组件通过 `var(--*)` / Tailwind token 类消费，禁止裸 hex 与任意 px → dev-review 评审 token 合规性 → dev-selfcheck 由 `agent/ui_gate.py` 静态执行 UI 质量门禁（token 纪律 / 裸 hex / WCAG 对比度 / 可访问性 / 响应式），产出 `UI_GATE.md`，block 模式阻断并驱动重试。共享设计知识沉淀在 `skills/_shared/`（curated references，非 CSV 数据库），由 SKILL.md front matter 的 `shared: [..]` 按需注入——如 dev-requirement 不加载设计知识，dev-code 只加载 color/typography，避免每个 skill 背 34KB 无关上下文。
 
 **Git 集成**：工作区自动 `git init` + 每步产出后 `git commit`；dev-review 基于 `git diff <base>..HEAD` 做增量评审（仅审变更，非全扫）；`rerun` 在独立分支隔离，支持增量复审。`enable_git=False` 可关闭。
 

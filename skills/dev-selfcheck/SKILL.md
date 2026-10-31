@@ -1,6 +1,6 @@
 ---
 name: dev-selfcheck
-version: 1.4.1
+version: 1.5.0
 description: Use when code/ and RUN.md exist and the generated project must be verified runnable before delivery — runs syntax checks, executes the test suite, validates runtime behavior, adds a UI quality gate (token discipline, contrast, accessibility, responsive) for frontend projects, fixes found issues, and produces SELF_CHECK.md with fresh verification evidence
 inputs: [$ARGUMENTS]
 outputs: [SELF_CHECK.md]
@@ -25,6 +25,8 @@ Run **syntax checks, test execution, consistency checks, and runtime verificatio
 > **v1.3 change**: added a UI quality gate. For frontend projects (fullstack / frontend_only / pure HTML+JS), an additional check dimension is now enforced — token discipline (no bare hex / arbitrary px, fonts via @import), icon discipline (no emoji as structural icons), color contrast (≥ 4.5:1), touch targets (≥ 44px), accessibility (alt / aria-label / focus ring / reduced-motion), and responsive (viewport meta + breakpoints). See `references/ui-pre-delivery-checklist.md` for the full gate. This gate is additive to the existing seven check categories and reuses the same evidence-before-claims principle (grep outputs MUST be pasted, not "looks fine").
 
 > **v1.4 change**: enforced SELF_CHECK.md completeness. The health check now rejects SELF_CHECK.md files that contain more than 3 residual markers (`pending` / `待填充` / `待完成` / `待检查`). Writing the skeleton in Step 1 and then ending without filling it in is NO LONGER accepted — every check item MUST have a concrete PASS / FAIL + evidence result.
+
+> **v1.5 change**: the UI quality gate is now **machine-enforced**. After this step, the engine runs a static UI gate (`agent/ui_gate.py`) and writes `UI_GATE.md` with `file:line` findings. Raw hex, missing `alt`, unnamed buttons, missing viewport, low token contrast, etc. are blockers in `block` mode and will drive a retry. Do NOT claim UI compliance without reading `UI_GATE.md`; fix blockers by file/line, then re-run tests. Browser-only facts (actual rendered size / computed contrast) remain manual.
 
 ## Inputs
 
@@ -150,7 +152,7 @@ The report MUST strictly follow this section order. Section titles must not be s
 2. **Checklist**: list the seven check categories (syntax / **test execution** / tags / paths / deps / startup command / runtime verification), each describing the scope and method. For frontend projects, also list the UI quality gate categories (token discipline / icon discipline / contrast / touch targets / accessibility / responsive).
 3. **Per-item Results**: give PASS / FAIL + reason + **verification evidence** for each item (FAIL must specify the file and problem; the test-execution item MUST paste run_command output).
 4. **Test Execution Evidence**: a standalone section pasting the full command + exit_code + output summary (last 10-20 lines) of `pytest` / `npm test`.
-5. **UI Quality Gate (frontend projects only)**: paste the grep commands + outputs for token/icon/accessibility checks; cite the token values judged for contrast; mark N/A for non-frontend projects. See `references/ui-pre-delivery-checklist.md` for the compact checklist to embed here.
+5. **UI Quality Gate (frontend projects only)**: first check whether `UI_GATE.md` exists from a previous gate run — if yes, read it and fix every blocker by `file:line` before finishing. Then record the static checks you verified yourself (bare hex, `img alt`, button accessible names, input labels, viewport, `@media`, `prefers-reduced-motion`, token-pair contrast). The engine re-runs the static gate after this step and overwrites `UI_GATE.md`; browser-only facts (real rendered contrast, actual touch target size) must be marked MANUAL-CHECK with the token/class values you inspected. Mark N/A for non-frontend projects.
 6. **Fixed Issues**: record fixes one by one (file path + problem + fix method + **re-run test evidence after fix**).
 7. **Unfixed Issues**: list unfixed items (if any), explaining the reason, impact, and follow-up recommendation.
 8. **Summary**: overall runnability conclusion, residual risks, whether delivery is recommended.

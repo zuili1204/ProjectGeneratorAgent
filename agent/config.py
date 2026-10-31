@@ -65,6 +65,12 @@ VALID_CHECKPOINT_TIMEOUT_ACTIONS: tuple[str, ...] = (
 #   off:    不执行验证门禁
 VALID_VERIFICATION_GATES: tuple[str, ...] = ("strict", "tests", "off")
 
+# 静态 UI 质量门模式（dev-selfcheck，仅前端项目）
+#   block: 客观问题（裸 hex / 低对比度 / 缺 alt 等）阻断并驱动重试
+#   warn:  只告警不阻断
+#   off:   不执行
+VALID_UI_GATES: tuple[str, ...] = ("block", "warn", "off")
+
 
 # === 默认 LLM 配置 ===
 DEFAULT_LLM_BASE_URL = "https://api.deepseek.com/v1"
@@ -83,6 +89,7 @@ DEFAULT_LLM_RETRY_MAX_DELAY = 30.0
 DEFAULT_GLOBAL_TIMEOUT = 3600   # 单个工作流整体上限
 DEFAULT_STEP_TIMEOUT = 1200     # 单步上限
 DEFAULT_HEALTH_RETRY = 2        # 健康检查失败重试次数
+DEFAULT_DEBUG_MAX_ROUNDS = 1    # 自动调试最多轮次（dev-debug）
 
 # 默认上下文窗口（token），用于预算估算
 DEFAULT_MODEL_CONTEXT_WINDOW = 32768
@@ -292,12 +299,17 @@ class WorkflowConfig:
     checkpoint_timeout_action: str = "auto_reject"
     # 健康检查失败重试次数
     health_retry: int = DEFAULT_HEALTH_RETRY
+    # 自动调试（dev-debug）：健康检查重试耗尽后，先跑一轮根因调试再判失败
+    auto_debug: bool = True
+    debug_max_rounds: int = DEFAULT_DEBUG_MAX_ROUNDS
     # 全局 / 步骤级超时
     global_timeout: int = DEFAULT_GLOBAL_TIMEOUT
     step_timeout: int = DEFAULT_STEP_TIMEOUT
     # 验证门禁（dev-selfcheck）：strict / tests / off
     #   strict — 测试 + 运行时全过；tests — 只硬性要求测试通过；off — 关闭
     verification_gate: str = "tests"
+    # 静态 UI 质量门（前端项目）：block / warn / off
+    ui_gate: str = "block"
     # Git 集成（P3-1）：create_workflow 时 git init，每步 commit，rerun 新建分支。
     # git 不可用时优雅降级，不影响主流程。可通过参数关闭。
     enable_git: bool = True
@@ -311,6 +323,9 @@ class WorkflowConfig:
         if self.verification_gate not in VALID_VERIFICATION_GATES:
             log.warning("unknown verification_gate %r, fallback to tests", self.verification_gate)
             self.verification_gate = "tests"
+        if self.ui_gate not in VALID_UI_GATES:
+            log.warning("unknown ui_gate %r, fallback to block", self.ui_gate)
+            self.ui_gate = "block"
 
     @classmethod
     def from_dict(cls, d: dict | None = None) -> "WorkflowConfig":
@@ -324,8 +339,11 @@ class WorkflowConfig:
             project_type=str(d.get("project_type", "fullstack")),
             checkpoint_timeout_action=str(d.get("checkpoint_timeout_action", "auto_reject")),
             health_retry=int(d.get("health_retry", DEFAULT_HEALTH_RETRY)),
+            auto_debug=bool(d.get("auto_debug", True)),
+            debug_max_rounds=int(d.get("debug_max_rounds", DEFAULT_DEBUG_MAX_ROUNDS)),
             global_timeout=int(d.get("global_timeout", DEFAULT_GLOBAL_TIMEOUT)),
             step_timeout=int(d.get("step_timeout", DEFAULT_STEP_TIMEOUT)),
             verification_gate=str(d.get("verification_gate", "tests")),
+            ui_gate=str(d.get("ui_gate", "block")),
             enable_git=bool(d.get("enable_git", True)),
         )

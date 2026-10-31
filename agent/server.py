@@ -225,6 +225,7 @@ class CreateWorkflowRequest(BaseModel):
     enable_checkpoints: bool = Field(True, description="开启检查点")
     enable_review: bool = Field(False, description="启用 dev-review 评审步骤（需模板支持）")
     verification_gate: str = Field("tests", description="dev-selfcheck 验证门禁: strict/tests/off")
+    ui_gate: str = Field("block", description="静态 UI 质量门: block/warn/off")
     max_iter: int = Field(50, description="agent 最大迭代次数")
 
 
@@ -341,6 +342,7 @@ def create_app() -> FastAPI:
             "auto_proceed": req.auto_proceed,
             "project_type": req.project_type,
             "verification_gate": req.verification_gate,
+            "ui_gate": req.ui_gate,
         })
         engine = WorkflowEngine(llm_config=llm_config, workflow_config=wf_config)
         workflow_id = engine.create_workflow(
@@ -355,6 +357,7 @@ def create_app() -> FastAPI:
                 "auto_proceed": req.auto_proceed,
                 "enable_review": req.enable_review,
                 "verification_gate": req.verification_gate,
+                "ui_gate": req.ui_gate,
             },
         )
         return {
