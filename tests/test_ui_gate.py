@@ -112,6 +112,38 @@ def test_non_frontend_is_skipped(ws_dir):
     assert any("非前端" in n for n in report.notes)
 
 
+def test_focus_removed_and_motion_warnings(ws_dir):
+    ws = Workspace("wf_ui_focus")
+    ws.write_file("code/css/tokens.css", ":root { --bg: #ffffff; --fg: #000000; }\n")
+    ws.write_file(
+        "code/css/style.css",
+        ".btn:focus { outline: none; }\n.card { transition: color .2s; }\n",
+    )
+    ws.write_file("code/index.html", GOOD_HTML)
+
+    report = run_ui_gate(ws, "frontend_only")
+    codes = {f.code for f in report.findings}
+
+    assert "FOCUS_REMOVED" in codes
+    assert "NO_REDUCED_MOTION" in codes
+
+
+def test_reduced_motion_in_another_file_suppresses_warning(ws_dir):
+    ws = Workspace("wf_ui_motion_ok")
+    ws.write_file("code/css/tokens.css", ":root { --bg: #ffffff; --fg: #000000; }\n")
+    ws.write_file("code/css/motion.css", ".card { transition: color .2s; }\n")
+    ws.write_file(
+        "code/css/responsive.css",
+        "@media (prefers-reduced-motion: reduce) { .card { transition: none; } }\n",
+    )
+    ws.write_file("code/index.html", GOOD_HTML)
+
+    report = run_ui_gate(ws, "frontend_only")
+    codes = {f.code for f in report.findings}
+
+    assert "NO_REDUCED_MOTION" not in codes
+
+
 def _wire_workspace(wid: str) -> Workspace:
     ws = Workspace(wid)
     ws.write_file("project.json", '{"title":"t","project_type":"frontend_only"}')

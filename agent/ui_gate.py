@@ -410,30 +410,33 @@ def _check_css(
     workspace: Workspace, css_files: list[str], report: UiGateReport,
 ) -> None:
     has_media = False
+    has_motion = False
+    has_reduced_motion = False
+
     for rel in css_files:
         text = _read(workspace, rel)
         if not text:
             continue
         if _MEDIA_RE.search(text):
             has_media = True
+        if "prefers-reduced-motion" in text:
+            has_reduced_motion = True
+        if re.search(r"(?:animation|transition)\s*:", text, re.IGNORECASE):
+            has_motion = True
 
-        # outline: none 必须配 :focus-visible
-        if re.search(r"outline\s*:\s*(?:none|0)\b", text, re.IGNORECASE) and \
-                ":focus-visible" not in text and ":focus" not in text:
-            report.findings.append(UiFinding(
-                "warn", "FOCUS_REMOVED", rel, 1,
-                "移除了 outline，但没有 :focus / :focus-visible 替代样式",
-                "为键盘用户补可见焦点环",
+        # outline: none 必须配 :focus-visible，或在 :focus 规则里给出可见替代
+        if re.search(r"outline\s*:\s*(?:none|0)\b", text, re.IGNORECASE):
+            has_alt = ":focus-visible" in text or bool(re.search(
+                r":focus[^{]*\{[^}]*(?:box-shadow|border(?:-[a-z]+)?\s*:)",
+                text,
+                re.IGNORECASE,
             ))
-
-        # 动效必须有 reduced-motion 兜底
-        if re.search(r"(?:animation|transition)\s*:", text, re.IGNORECASE) and \
-                "prefers-reduced-motion" not in text:
-            report.findings.append(UiFinding(
-                "warn", "NO_REDUCED_MOTION", rel, 1,
-                "存在 animation/transition，但未处理 prefers-reduced-motion",
-                "加 @media (prefers-reduced-motion: reduce) 关闭/弱化动效",
-            ))
+            if not has_alt:
+                report.findings.append(UiFinding(
+                    "warn", "FOCUS_REMOVED", rel, 1,
+                    "移除了 outline，但没有 :focus-visible 或可见 focus 替代样式",
+                    "为键盘用户补可见焦点环（box-shadow / border / outline）",
+                ))
 
         # 触控目标：button/.btn 规则里显式 min-height/min-width < 44px
         for m in _RULE_RE.finditer(text):
@@ -448,6 +451,13 @@ def _check_css(
                         f"交互控件 {dim}={dm.group(1)}px，小于 44px",
                         "触控目标建议 ≥44×44px",
                     ))
+
+    if has_motion and not has_reduced_motion:
+        report.findings.append(UiFinding(
+            "warn", "NO_REDUCED_MOTION", css_files[0], 1,
+            "存在 animation/transition，但全站未处理 prefers-reduced-motion",
+            "加 @media (prefers-reduced-motion: reduce) 关闭/弱化动效",
+        ))
 
     if css_files and not has_media:
         report.findings.append(UiFinding(
